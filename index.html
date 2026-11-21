@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#0f1115">
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" href="icon.svg">
+<title>Gastos de Viaje</title>
+<style>
+:root{--bg:#0f1115;--card:#181b22;--line:#262a33;--tx:#e8eaee;--mu:#8b92a1;--ac:#5b9dff;--ok:#3ecf8e;--bad:#ff6b6b}
+@media(prefers-color-scheme:light){:root{--bg:#f4f5f7;--card:#fff;--line:#e2e5ea;--tx:#15171c;--mu:#6a7282;--ac:#2563eb;--ok:#0f9d58;--bad:#d93025}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--tx);font:16px/1.4 system-ui,sans-serif;padding-bottom:90px}
+header{position:sticky;top:0;background:var(--bg);border-bottom:1px solid var(--line);padding:12px 16px;display:flex;align-items:center;gap:8px;z-index:5}
+header h1{font-size:18px;margin:0;flex:1;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+main{padding:12px 16px;max-width:640px;margin:auto}
+button{font:inherit;color:inherit;background:var(--card);border:1px solid var(--line);border-radius:10px;padding:8px 12px}
+button.p{background:var(--ac);border-color:var(--ac);color:#fff}
+button.d{color:var(--bad)}
+.ic{background:none;border:none;font-size:20px;padding:6px 8px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:12px;margin:8px 0}
+.row{display:flex;justify-content:space-between;align-items:center;gap:8px}
+.mu{color:var(--mu);font-size:13px}.b{font-weight:600}
+.ok{color:var(--ok)}.bad{color:var(--bad)}
+.tabs{display:flex;gap:6px;margin-bottom:8px}.tabs button{flex:1}.tabs .on{background:var(--ac);border-color:var(--ac);color:#fff}
+.fab{position:fixed;right:16px;bottom:calc(16px + env(safe-area-inset-bottom));border-radius:28px;padding:14px 20px;box-shadow:0 4px 14px #0006}
+dialog{background:var(--card);color:var(--tx);border:1px solid var(--line);border-radius:14px;width:min(92vw,440px);padding:16px}
+dialog::backdrop{background:#0009}
+label{display:block;margin:10px 0 4px;font-size:13px;color:var(--mu)}
+input,select{width:100%;font:inherit;color:var(--tx);background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:10px}
+.chips{display:flex;flex-wrap:wrap;gap:6px}
+.chip{border-radius:20px;padding:6px 12px}.chip.on{background:var(--ac);border-color:var(--ac);color:#fff}
+.acts{display:flex;gap:8px;justify-content:flex-end;margin-top:16px}
+.empty{text-align:center;color:var(--mu);padding:40px 0}
+</style>
+</head>
+<body>
+<header id="hd"></header>
+<main id="app"></main>
+<dialog id="dlg"></dialog>
+<script>
+const KEY='gastos-viaje-v1';
+let S=load(), view=null, tab='gastos';
+function load(){try{return JSON.parse(localStorage.getItem(KEY))||{trips:[]}}catch{return{trips:[]}}}
+function save(){try{localStorage.setItem(KEY,JSON.stringify(S))}catch{alert('No se pudo guardar en el dispositivo')}}
+const uid=()=>Math.random().toString(36).slice(2,10);
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const $=s=>document.querySelector(s);
+const trip=()=>S.trips.find(t=>t.id===view);
+
+// ---- dinero (centavos enteros) ----
+function parseAmt(s){
+  s=String(s).replace(/[^\d.,]/g,'');
+  if(!s)return NaN;
+  const lc=s.lastIndexOf(','),ld=s.lastIndexOf('.');
+  if(lc>-1&&ld>-1){const dec=lc>ld?',':'.';const th=dec===','?'.':',';s=s.split(th).join('').replace(dec,'.')}
+  else if(lc>-1){s=s.replace(',','.')}
+  else if(/^\d{1,3}(\.\d{3})+$/.test(s)){s=s.split('.').join('')}
+  const n=parseFloat(s);return isFinite(n)&&n>0?Math.round(n*100):NaN;
+}
+const fmt=(c,t)=>(c<0?'-':'')+(t?.cur||'$')+(Math.abs(c)/100).toLocaleString('es-AR',{minimumFractionDigits:2,maximumFractionDigits:2});
+function shares(e){
+  const n=e.parts.length,base=Math.floor(e.amt/n);let rem=e.amt-base*n;
+  return e.parts.map(p=>({p,v:base+(rem-->0?1:0)}));
+}
+function balances(t){
+  const b={};t.people.forEach(p=>b[p.id]=0);
+  t.expenses.forEach(e=>{if(b[e.payer]!==undefined)b[e.payer]+=e.amt;shares(e).forEach(s=>{if(b[s.p]!==undefined)b[s.p]-=s.v})});
+  return b;
+}
+function settle(t){
+  const b=balances(t),cr=[],db=[];
+  Object.entries(b).forEach(([id,v])=>{if(v>0)cr.push([id,v]);else if(v<0)db.push([id,-v])});
+  cr.sort((a,b)=>b[1]-a[1]);db.sort((a,b)=>b[1]-a[1]);
+  const out=[];let i=0,j=0;
+  while(i<cr.length&&j<db.length){
+    const m=Math.min(cr[i][1],db[j][1]);
+    out.push({from:db[j][0],to:cr[i][0],v:m});
+    cr[i][1]-=m;db[j][1]-=m;if(!cr[i][1])i++;if(!db[j][1])j++;
+  }
+  return out;
+}
+const name=(t,id)=>t.people.find(p=>p.id===id)?.name||'?';
+
+// ---- render ----
+function render(){
+  const t=view&&trip();if(view&&!t)view=null;
+  if(!t){
+    $('#hd').innerHTML='<h1>✈️ Mis viajes</h1><button id="imp">Importar</button>';
+    $('#imp').onclick=importJSON;
+    $('#app').innerHTML=(S.trips.length?S.trips.map(x=>`<div class="card row" data-t="${x.id}" style="cursor:pointer"><div><div class="b">${esc(x.name)}</div><div class="mu">${x.people.map(p=>esc(p.name)).join(', ')} · ${x.expenses.length} gastos</div></div><div class="b">${fmt(x.expenses.reduce((a,e)=>a+e.amt,0),x)}</div></div>`).join(''):'<div class="empty">Todavía no hay viajes.<br>Creá el primero.</div>')+'<button class="p fab" id="nt">+ Nuevo viaje</button>';
+    document.querySelectorAll('[data-t]').forEach(el=>el.onclick=()=>{view=el.dataset.t;tab='gastos';render()});
+    $('#nt').onclick=tripDialog;return;
+  }
+  $('#hd').innerHTML=`<button class="ic" id="bk">←</button><h1>${esc(t.name)}</h1><button class="ic" id="mn">⋯</button>`;
+  $('#bk').onclick=()=>{view=null;render()};$('#mn').onclick=menuDialog;
+  const tot=t.expenses.reduce((a,e)=>a+e.amt,0);
+  let h=`<div class="card row"><span class="mu">Total gastado</span><span class="b">${fmt(tot,t)}</span></div>
+  <div class="tabs"><button data-tab="gastos" class="${tab==='gastos'?'on':''}">Gastos</button><button data-tab="saldos" class="${tab==='saldos'?'on':''}">Saldos</button></div>`;
+  if(tab==='gastos'){
+    h+=t.expenses.length?[...t.expenses].reverse().map(e=>{
+      const all=e.parts.length===t.people.length;
+      return `<div class="card row" data-e="${e.id}" style="cursor:pointer"><div><div class="b">${esc(e.desc)}</div><div class="mu">Pagó ${esc(name(t,e.payer))} · ${all?'entre todos':'solo '+e.parts.map(p=>esc(name(t,p))).join(', ')}</div></div><div class="b">${fmt(e.amt,t)}</div></div>`}).join(''):'<div class="empty">Sin gastos todavía.</div>';
+    h+='<button class="p fab" id="ne">+ Gasto</button>';
+  }else{
+    const b=balances(t),st=settle(t);
+    h+='<div class="card"><div class="mu" style="margin-bottom:6px">Balance por persona</div>'+t.people.map(p=>`<div class="row"><span>${esc(p.name)}</span><span class="b ${b[p.id]>0?'ok':b[p.id]<0?'bad':''}">${b[p.id]>0?'le deben ':b[p.id]<0?'debe ':''}${fmt(Math.abs(b[p.id]),t)}</span></div>`).join('')+'</div>';
+    h+='<div class="card"><div class="mu" style="margin-bottom:6px">Para saldar</div>'+(st.length?st.map(s=>`<div class="row"><span>${esc(name(t,s.from))} → ${esc(name(t,s.to))}</span><span class="b">${fmt(s.v,t)}</span></div>`).join(''):'<div>Están a mano ✔</div>')+'</div>';
+    h+='<button class="p" id="sh" style="width:100%">Compartir resumen</button>';
+  }
+  $('#app').innerHTML=h;
+  document.querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>{tab=b.dataset.tab;render()});
+  document.querySelectorAll('[data-e]').forEach(el=>el.onclick=()=>expDialog(el.dataset.e));
+  $('#ne')&&($('#ne').onclick=()=>expDialog());
+  $('#sh')&&($('#sh').onclick=shareSummary);
+}
+
+// ---- diálogos ----
+function open(html){const d=$('#dlg');d.innerHTML=html;d.showModal();return d}
+function close(){$('#dlg').close()}
+
+function tripDialog(){
+  const d=open(`<h3 style="margin:0">Nuevo viaje</h3>
+  <label>Nombre</label><input id="n" placeholder="Orlando 2026">
+  <label>Personas (separadas por coma)</label><input id="p" placeholder="Her, Lu">
+  <label>Símbolo de moneda</label><input id="c" value="$">
+  <div class="acts"><button id="x">Cancelar</button><button class="p" id="ok">Crear</button></div>`);
+  d.querySelector('#x').onclick=close;
+  d.querySelector('#ok').onclick=()=>{
+    const n=d.querySelector('#n').value.trim();
+    const ps=[...new Set(d.querySelector('#p').value.split(',').map(s=>s.trim()).filter(Boolean))];
+    if(!n||ps.length<2)return alert('Poné un nombre y al menos 2 personas');
+    const t={id:uid(),name:n,cur:d.querySelector('#c').value.trim()||'$',people:ps.map(x=>({id:uid(),name:x})),expenses:[]};
+    S.trips.push(t);save();view=t.id;tab='gastos';close();render();
+  };
+}
+
+function expDialog(id){
+  const t=trip(),e=id?t.expenses.find(x=>x.id===id):null;
+  let parts=new Set(e?e.parts:t.people.map(p=>p.id));
+  const d=open(`<h3 style="margin:0">${e?'Editar gasto':'Nuevo gasto'}</h3>
+  <label>Monto</label><input id="a" inputmode="decimal" placeholder="0,00" value="${e?(e.amt/100).toFixed(2).replace('.',','):''}">
+  <label>Concepto</label><input id="d" value="${e?esc(e.desc):''}">
+  <label>Pagó</label><select id="w">${t.people.map(p=>`<option value="${p.id}" ${e&&e.payer===p.id?'selected':''}>${esc(p.name)}</option>`).join('')}</select>
+  <label>Se reparte entre</label><div class="chips" id="ch"></div>
+  <div class="mu" id="pv" style="margin-top:8px"></div>
+  <div class="acts">${e?'<button class="d" id="del">Borrar</button>':''}<button id="x">Cancelar</button><button class="p" id="ok">Guardar</button></div>`);
+  const paint=()=>{
+    d.querySelector('#ch').innerHTML=t.people.map(p=>`<button class="chip ${parts.has(p.id)?'on':''}" data-p="${p.id}">${esc(p.name)}</button>`).join('');
+    d.querySelectorAll('[data-p]').forEach(b=>b.onclick=()=>{parts.has(b.dataset.p)?parts.delete(b.dataset.p):parts.add(b.dataset.p);paint()});
+    const a=parseAmt(d.querySelector('#a').value);
+    d.querySelector('#pv').textContent=(!isNaN(a)&&parts.size)?'Cada uno: '+shares({amt:a,parts:[...parts]}).map(s=>name(t,s.p)+' '+fmt(s.v,t)).join(' · '):'';
+  };
+  d.querySelector('#a').oninput=paint;paint();
+  d.querySelector('#x').onclick=close;
+  if(e)d.querySelector('#del').onclick=()=>{if(confirm('¿Borrar este gasto?')){t.expenses=t.expenses.filter(x=>x.id!==id);save();close();render()}};
+  d.querySelector('#ok').onclick=()=>{
+    const amt=parseAmt(d.querySelector('#a').value),desc=d.querySelector('#d').value.trim();
+    if(isNaN(amt))return alert('Monto inválido');
+    if(!desc)return alert('Falta el concepto');
+    if(!parts.size)return alert('Elegí al menos una persona');
+    const o={id:e?e.id:uid(),amt,desc,payer:d.querySelector('#w').value,parts:t.people.filter(p=>parts.has(p.id)).map(p=>p.id),date:e?e.date:Date.now()};
+    if(e)Object.assign(e,o);else t.expenses.push(o);
+    save();close();render();
+  };
+}
+
+function menuDialog(){
+  const t=trip();
+  const d=open(`<h3 style="margin:0">${esc(t.name)}</h3><div style="display:grid;gap:8px;margin-top:12px">
+  <button id="csv">Exportar CSV</button><button id="js">Exportar viaje (JSON)</button><button class="d" id="dt">Borrar viaje</button><button id="x">Cerrar</button></div>`);
+  d.querySelector('#x').onclick=close;
+  d.querySelector('#csv').onclick=()=>{
+    const q=s=>'"'+String(s).replace(/"/g,'""')+'"';
+    const rows=[['Monto','Concepto','Pagó','Entre'],...t.expenses.map(e=>[(e.amt/100).toFixed(2),e.desc,name(t,e.payer),e.parts.map(p=>name(t,p)).join(' / ')])];
+    download(t.name+'.csv',rows.map(r=>r.map(q).join(',')).join('\n'),'text/csv');close();
+  };
+  d.querySelector('#js').onclick=()=>{download(t.name+'.json',JSON.stringify(t),'application/json');close()};
+  d.querySelector('#dt').onclick=()=>{if(confirm('¿Borrar el viaje y todos sus gastos?')){S.trips=S.trips.filter(x=>x.id!==t.id);save();view=null;close();render()}};
+}
+
+function download(fn,txt,type){const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([txt],{type}));a.download=fn;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000)}
+function importJSON(){
+  const i=document.createElement('input');i.type='file';i.accept='.json';
+  i.onchange=async()=>{try{
+    const t=JSON.parse(await i.files[0].text());
+    if(!t.name||!Array.isArray(t.people)||!Array.isArray(t.expenses))throw 0;
+    t.id=uid();S.trips.push(t);save();render();
+  }catch{alert('Archivo inválido')}};
+  i.click();
+}
+function shareSummary(){
+  const t=trip(),st=settle(t);
+  const txt=`${t.name}\nTotal: ${fmt(t.expenses.reduce((a,e)=>a+e.amt,0),t)}\n`+(st.length?st.map(s=>`${name(t,s.from)} le debe ${fmt(s.v,t)} a ${name(t,s.to)}`).join('\n'):'Están a mano');
+  if(navigator.share)navigator.share({text:txt}).catch(()=>{});
+  else navigator.clipboard?.writeText(txt).then(()=>alert('Resumen copiado'));
+}
+
+render();
+if('serviceWorker'in navigator)navigator.serviceWorker.register('sw.js').catch(()=>{});
+</script>
+</body>
+</html>
