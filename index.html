@@ -164,7 +164,7 @@ function kick(){
   S.trips.filter(t=>t.code&&!subs[t.code]).forEach(subscribe);
 }
 let failAt=0;
-const fail=e=>{console.error('Error de sincronización',e);if(Date.now()-failAt>5000){failAt=Date.now();alert('No se pudo guardar en la nube ('+(e.code||e.message)+').')}};
+const fail=e=>{console.error('Error de sincronización',e);if(Date.now()-failAt>5000){failAt=Date.now();alert('No se pudo guardar en la nube ('+(e.code||e.message)+'). Menú ⋯ → Diagnóstico para ver la causa.')}};
 function remoteSave(t,e,act='save',c=t.code){
   const {db,fs}=sync;
   const o={amt:e.amt,desc:e.desc,payer:e.payer,parts:e.parts,date:e.date};
@@ -456,13 +456,14 @@ function menuDialog(){
   const t=trip();
   const d=open(`<h3 style="margin:0">${esc(t.name)}</h3><div style="display:grid;gap:8px;margin-top:12px">
   <button id="ip">📋 Importar desde planilla</button>
-  ${t.code?`<button id="tr">🗑️ Papelera (${(t.trash||[]).length})</button><button id="me">👤 Este celular es de: ${esc(meName(t)||'?')}</button>`:''}
+  ${t.code?`<button id="tr">🗑️ Papelera (${(t.trash||[]).length})</button><button id="me">👤 Este celular es de: ${esc(meName(t)||'?')}</button><button id="dg">🩺 Diagnóstico de sincronización</button>`:''}
   ${t.code?'<button id="cd">☁️ Compartir código del viaje</button>':sync&&!SOLO_UN_VIAJE?'<button id="sy">☁️ Sincronizar entre celulares</button>':''}
   <button id="csv">Exportar CSV</button><button id="js">Exportar viaje (JSON)</button><button class="d" id="dt">${t.code?'Quitar de este celular':'Borrar viaje'}</button><button id="x">Cerrar</button></div>`);
   d.querySelector('#x').onclick=close;
   d.querySelector('#ip').onclick=importDialog;
   d.querySelector('#tr')&&(d.querySelector('#tr').onclick=()=>trashDialog(t));
   d.querySelector('#me')&&(d.querySelector('#me').onclick=()=>meDialog(t));
+  d.querySelector('#dg')&&(d.querySelector('#dg').onclick=()=>diagDialog(t));
   d.querySelector('#cd')&&(d.querySelector('#cd').onclick=()=>codeDialog(t));
   d.querySelector('#sy')&&(d.querySelector('#sy').onclick=()=>{enableSync(t);render();codeDialog(t)});
   d.querySelector('#csv').onclick=()=>{
@@ -518,6 +519,25 @@ async function historyDialog(t,e){
     t.expenses=t.expenses.filter(y=>y.id!==e.id).concat(x).sort((a,b)=>a.date-b.date);t.trash=(t.trash||[]).filter(y=>y.id!==e.id);
     remoteSave(t,x,'restore');save();close();render();
   });
+}
+async function diagDialog(t){
+  if(!sync)return alert('La sincronización no está disponible en este celular (no cargó Firebase).');
+  const {db,fs}=sync,d=open('<h3 style="margin:0">🩺 Diagnóstico</h3><p class="mu">Revisando…</p>');
+  const run=async f=>{try{await f();return 'ok'}catch(e){return e.code||e.message}};
+  const viaje=await run(()=>fs.getDocFromServer(fs.doc(db,'trips',t.code)));
+  const hist=await run(()=>fs.getDocsFromServer(fs.query(fs.collection(db,'trips',t.code,'history'),fs.limit(1))));
+  const ic=x=>x==='ok'?'✔':'✖';
+  let msg;
+  if(viaje==='unavailable'||hist==='unavailable')msg='No hay conexión con Firebase. Revisá internet y volvé a probar.';
+  else if(viaje==='permission-denied')msg=`El código del viaje en las reglas <b>no coincide</b>. En Firebase → Firestore → Reglas, la línea <code>esElViaje</code> tiene que tener exactamente este código entre comillas simples:`;
+  else if(hist==='permission-denied')msg='Las reglas publicadas son las <b>viejas</b>. Pegá las reglas nuevas (con tu código en la línea 4) y tocá <b>Publicar</b>. Después recargá la app.';
+  else if(viaje==='ok'&&hist==='ok')msg='Las reglas están bien. Si igual aparece "permission-denied", mandá una captura de esta pantalla.';
+  else msg='Resultado inesperado. Mandá una captura de esta pantalla.';
+  d.innerHTML=`<h3 style="margin:0">🩺 Diagnóstico</h3>
+  <div class="card"><div>${ic(viaje)} Leer el viaje <span class="mu">(${esc(viaje)})</span></div><div>${ic(hist)} Reglas nuevas activas <span class="mu">(${esc(hist)})</span></div></div>
+  <p>${msg}</p>${viaje==='permission-denied'?`<div class="card b" style="word-break:break-all;text-align:center;user-select:all">${esc(t.code)}</div>`:''}
+  <div class="acts"><button id="x">Cerrar</button></div>`;
+  d.querySelector('#x').onclick=close;
 }
 function codeDialog(t){
   const link=location.origin+location.pathname+'#join='+t.code;
