@@ -1,0 +1,25 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Cada viaje se identifica con un código aleatorio de 20 caracteres (no se puede listar ni adivinar).
+    match /trips/{code} {
+      allow get: if code.size() >= 16;
+      allow list: if false;
+      allow create, update: if code.size() >= 16
+        && request.resource.data.keys().hasOnly(['name','cur','people','createdAt'])
+        && request.resource.data.name is string && request.resource.data.name.size() <= 100
+        && request.resource.data.cur is string && request.resource.data.cur.size() <= 5
+        && request.resource.data.people is list && request.resource.data.people.size() <= 20;
+      allow delete: if false;
+
+      match /expenses/{id} {
+        allow read, delete: if code.size() >= 16;
+        allow create, update: if code.size() >= 16
+          && request.resource.data.keys().hasOnly(['amt','desc','payer','parts','date'])
+          && request.resource.data.amt is int && request.resource.data.amt > 0
+          && request.resource.data.desc is string && request.resource.data.desc.size() <= 200
+          && request.resource.data.parts is list && request.resource.data.parts.size() <= 20;
+      }
+    }
+  }
+}
