@@ -111,7 +111,7 @@ function settle(t){
 const name=(t,id)=>t.people.find(p=>p.id===id)?.name||'?';
 
 // ---- sincronización (Firebase Firestore) ----
-let sync=null;const subs={},pend={};
+let sync=null;const subs={},pend={},live={},serr={};
 const ALPHA='abcdefghijkmnpqrstuvwxyz23456789';
 const genCode=()=>Array.from(crypto.getRandomValues(new Uint8Array(20)),b=>ALPHA[b%ALPHA.length]).join('');
 const showCode=c=>c.match(/.{1,5}/g).join('-');
@@ -123,7 +123,8 @@ async function initSync(){
       const B='https://www.gstatic.com/firebasejs/10.12.2/';
       const [{initializeApp},fs]=await Promise.all([import(B+'firebase-app.js'),import(B+'firebase-firestore.js')]);
       const app=initializeApp(cfg);let db;
-      try{db=fs.initializeFirestore(app,{localCache:fs.persistentLocalCache({tabManager:fs.persistentMultipleTabManager()})})}
+      // Long polling: funciona aunque la red móvil retenga las conexiones en vivo.
+      try{db=fs.initializeFirestore(app,{experimentalForceLongPolling:true,localCache:fs.persistentLocalCache({tabManager:fs.persistentMultipleTabManager()})})}
       catch{db=fs.getFirestore(app)}
       sync={db,fs};
       S.trips.filter(t=>t.code).forEach(subscribe);
@@ -134,17 +135,28 @@ async function initSync(){
   if(m&&sync){history.replaceState(null,'',location.pathname+location.search);joinDialog(m[1])}
 }
 function subscribe(t){
-  if(!sync||subs[t.code])return;
-  const {db,fs}=sync,c=t.code;
-  const u1=fs.onSnapshot(fs.doc(db,'trips',c),snap=>{
+  if(!sync||subs[t.code]||!S.trips.includes(t))return;
+  const {db,fs}=sync,c=t.code;let u1=()=>{},u2=()=>{},timer=null;
+  const stop=()=>{u1();u2();clearTimeout(timer)};
+  // Si la escucha en vivo se corta con error, se reintenta sola.
+  const onErr=err=>{console.warn('Escucha cortada',err);serr[c]=err.code||'error';live[c]=false;stop();delete subs[c];render();timer=setTimeout(()=>subscribe(t),5000)};
+  u1=fs.onSnapshot(fs.doc(db,'trips',c),snap=>{
     if(!snap.exists())return;const d=snap.data();
     t.name=d.name;t.cur=d.cur;t.people=d.people;save();render();
-  },err=>console.warn(err));
-  const u2=fs.onSnapshot(fs.collection(db,'trips',c,'expenses'),snap=>{
+  },onErr);
+  u2=fs.onSnapshot(fs.collection(db,'trips',c,'expenses'),{includeMetadataChanges:true},snap=>{
     t.expenses=snap.docs.map(x=>({id:x.id,...x.data()})).sort((a,b)=>a.date-b.date);
-    pend[c]=snap.metadata.hasPendingWrites;save();render();
-  },err=>console.warn(err));
-  subs[c]=()=>{u1();u2()};
+    pend[c]=snap.metadata.hasPendingWrites;live[c]=!snap.metadata.fromCache;delete serr[c];save();render();
+  },onErr);
+  subs[c]=stop;
+}
+// Al volver a la app o recuperar internet, reconecta en el acto (el celular congela la conexión en segundo plano).
+let kickAt=0;
+function kick(){
+  if(!sync||document.hidden||Date.now()-kickAt<3000)return;kickAt=Date.now();
+  const {db,fs}=sync;
+  fs.disableNetwork(db).then(()=>fs.enableNetwork(db)).catch(e=>console.warn(e));
+  S.trips.filter(t=>t.code&&!subs[t.code]).forEach(subscribe);
 }
 let failAt=0;
 const fail=e=>{console.error('Error de sincronización',e);if(Date.now()-failAt>5000){failAt=Date.now();alert('No se pudo guardar en la nube ('+(e.code||e.message)+').')}};
@@ -191,7 +203,7 @@ function render(){
   const st0=settle(t);
   let h=`<div class="card"><div class="row"><span class="mu">Total gastado</span><span class="b">${fmt(tot,t)}</span></div>
   ${st0.length?st0.map(s=>`<div class="row" style="margin-top:6px;font-size:17px"><span>${esc(name(t,s.from))} le debe a ${esc(name(t,s.to))}</span><span class="b bad">${fmt(s.v,t)}</span></div>`).join(''):'<div style="margin-top:6px">Están a mano ✔</div>'}</div>
-  ${t.code?`<div class="mu" style="text-align:center">☁️ ${!sync?'Sincronización no disponible':!navigator.onLine?'Sin conexión · se sincroniza al volver':pend[t.code]?'Pendiente de sincronizar…':'Sincronizado'}</div>`:''}
+  ${t.code?`<div class="mu" style="text-align:center">☁️ ${!sync?'Sincronización no disponible':!navigator.onLine?'Sin conexión · se sincroniza al volver':serr[t.code]?'Error de conexión ('+esc(serr[t.code])+') · reintentando…':pend[t.code]?'Pendiente de sincronizar…':live[t.code]?'Sincronizado en vivo':'Conectando…'}</div>`:''}
   <div class="tabs"><button data-tab="gastos" class="${tab==='gastos'?'on':''}">Gastos</button><button data-tab="saldos" class="${tab==='saldos'?'on':''}">Saldos</button><button data-tab="resumen" class="${tab==='resumen'?'on':''}">Resumen</button></div>`;
   if(tab==='gastos'){
     h+=t.expenses.length?[...t.expenses].reverse().map(e=>{
@@ -463,10 +475,12 @@ if(S.trips.length)view=(S.trips.find(t=>t.id===S.last)||S.trips[S.trips.length-1
 render();
 initSync();
 // Estado de conexión visible y app siempre actualizada: si vuelve a primer plano tras 30 min, recarga (los datos quedan guardados).
-addEventListener('online',render);addEventListener('offline',render);
+addEventListener('online',()=>{render();kick()});addEventListener('offline',render);
+addEventListener('focus',kick);addEventListener('pageshow',kick);
 let hiddenAt=0;
 document.addEventListener('visibilitychange',()=>{
   if(document.hidden){hiddenAt=Date.now();return}
+  kick();
   if(hiddenAt&&Date.now()-hiddenAt>30*60e3&&!$('#dlg').open&&navigator.onLine)location.reload();
 });
 if('serviceWorker'in navigator)navigator.serviceWorker.register('sw.js').catch(()=>{});
