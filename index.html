@@ -177,7 +177,7 @@ function render(){
   const st0=settle(t);
   let h=`<div class="card"><div class="row"><span class="mu">Total gastado</span><span class="b">${fmt(tot,t)}</span></div>
   ${st0.length?st0.map(s=>`<div class="row" style="margin-top:6px;font-size:17px"><span>${esc(name(t,s.from))} le debe a ${esc(name(t,s.to))}</span><span class="b bad">${fmt(s.v,t)}</span></div>`).join(''):'<div style="margin-top:6px">Están a mano ✔</div>'}</div>
-  ${t.code?`<div class="mu" style="text-align:center">☁️ ${!sync?'Sincronización no disponible':pend[t.code]?'Pendiente de sincronizar…':'Sincronizado'}</div>`:''}
+  ${t.code?`<div class="mu" style="text-align:center">☁️ ${!sync?'Sincronización no disponible':!navigator.onLine?'Sin conexión · se sincroniza al volver':pend[t.code]?'Pendiente de sincronizar…':'Sincronizado'}</div>`:''}
   <div class="tabs"><button data-tab="gastos" class="${tab==='gastos'?'on':''}">Gastos</button><button data-tab="saldos" class="${tab==='saldos'?'on':''}">Saldos</button></div>`;
   if(tab==='gastos'){
     h+=t.expenses.length?[...t.expenses].reverse().map(e=>{
@@ -410,6 +410,13 @@ function shareSummary(){
 if(S.trips.length)view=(S.trips.find(t=>t.id===S.last)||S.trips[S.trips.length-1]).id;
 render();
 initSync();
+// Estado de conexión visible y app siempre actualizada: si vuelve a primer plano tras 30 min, recarga (los datos quedan guardados).
+addEventListener('online',render);addEventListener('offline',render);
+let hiddenAt=0;
+document.addEventListener('visibilitychange',()=>{
+  if(document.hidden){hiddenAt=Date.now();return}
+  if(hiddenAt&&Date.now()-hiddenAt>30*60e3&&!$('#dlg').open&&navigator.onLine)location.reload();
+});
 if('serviceWorker'in navigator)navigator.serviceWorker.register('sw.js').catch(()=>{});
 </script>
 </body>
