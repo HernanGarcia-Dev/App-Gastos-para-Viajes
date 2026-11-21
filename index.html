@@ -32,6 +32,9 @@ input,select,textarea{width:100%;font:inherit;color:var(--tx);background:var(--b
 .chips{display:flex;flex-wrap:wrap;gap:6px}
 .chip{border-radius:20px;padding:6px 12px}.chip.on{background:var(--ac);border-color:var(--ac);color:#fff}
 .acts{display:flex;gap:8px;justify-content:flex-end;margin-top:16px}
+.bar{height:8px;background:var(--line);border-radius:4px;margin:4px 0 10px;overflow:hidden}
+.bar i{display:block;height:100%;background:var(--ac);border-radius:4px}
+details.cat summary{list-style:none;cursor:pointer}details.cat summary::-webkit-details-marker{display:none}
 .empty{text-align:center;color:var(--mu);padding:40px 0}
 </style>
 </head>
@@ -43,6 +46,17 @@ input,select,textarea{width:100%;font:inherit;color:var(--tx);background:var(--b
 const KEY='gastos-viaje-v1';
 // true: la app no permite crear viajes nuevos, solo usar/unirse al viaje existente.
 const SOLO_UN_VIAJE=true;
+// Categorías típicas de viaje. Las personalizadas ("Otra") salen de los gastos cargados, así se comparten solas entre celulares.
+const CATS=[['Alojamiento','🏨'],['Transporte','🚗'],['Comida','🍔'],['Entradas y actividades','🎢'],['Compras','🛍️']];
+const CAT_KW=[['Alojamiento',/hotel|hostel|airbnb|aloja|motel|resort|booking/],
+ ['Transporte',/auto|uber|taxi|cole|colectivo|bus|tren|brightline|nafta|gasolina|peaje|toll|estacion|parking|vuelo|avion|aero|metro|subte|lyft|remis/],
+ ['Comida',/comida|cena|almuerzo|desayuno|merienda|restau|subway|mcdonald|burger|cafe|starbucks|super|snack|bebida|pizza|helado/],
+ ['Compras',/compra|shopping|regalo|ropa|outlet|souvenir|walmart|target|mall/],
+ ['Entradas y actividades',/entrada|ticket|disney|universal|parque|tour|ksc|museo|excursion|show|seaworld|actividad/]];
+const norm=x=>String(x).toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g,'');
+const guessCat=d=>CAT_KW.find(([,r])=>r.test(norm(d)))?.[0]||'';
+const catIcon=c=>CATS.find(x=>x[0]===c)?.[1]||(c?'📦':'❔');
+const tripCats=t=>[...CATS.map(c=>c[0]),...[...new Set(t.expenses.map(e=>e.cat).filter(c=>c&&!CATS.some(x=>x[0]===c)))].sort()];
 let S=load(), view=null, tab='gastos';
 function load(){try{return JSON.parse(localStorage.getItem(KEY))||{trips:[]}}catch{return{trips:[]}}}
 function save(){try{localStorage.setItem(KEY,JSON.stringify(S))}catch{alert('No se pudo guardar en el dispositivo')}}
@@ -136,7 +150,7 @@ let failAt=0;
 const fail=e=>{console.error('Error de sincronización',e);if(Date.now()-failAt>5000){failAt=Date.now();alert('No se pudo guardar en la nube ('+(e.code||e.message)+').')}};
 function remoteSave(t,e,c=t.code){
   const {db,fs}=sync;
-  const o={amt:e.amt,desc:e.desc,payer:e.payer,parts:e.parts,date:e.date};if(e.split)o.split=e.split;
+  const o={amt:e.amt,desc:e.desc,payer:e.payer,parts:e.parts,date:e.date};if(e.split)o.split=e.split;if(e.cat)o.cat=e.cat;
   fs.setDoc(fs.doc(db,'trips',c,'expenses',e.id),o).catch(fail);
 }
 function remoteDel(t,id){const {db,fs}=sync;fs.deleteDoc(fs.doc(db,'trips',t.code,'expenses',id)).catch(fail)}
@@ -178,12 +192,12 @@ function render(){
   let h=`<div class="card"><div class="row"><span class="mu">Total gastado</span><span class="b">${fmt(tot,t)}</span></div>
   ${st0.length?st0.map(s=>`<div class="row" style="margin-top:6px;font-size:17px"><span>${esc(name(t,s.from))} le debe a ${esc(name(t,s.to))}</span><span class="b bad">${fmt(s.v,t)}</span></div>`).join(''):'<div style="margin-top:6px">Están a mano ✔</div>'}</div>
   ${t.code?`<div class="mu" style="text-align:center">☁️ ${!sync?'Sincronización no disponible':!navigator.onLine?'Sin conexión · se sincroniza al volver':pend[t.code]?'Pendiente de sincronizar…':'Sincronizado'}</div>`:''}
-  <div class="tabs"><button data-tab="gastos" class="${tab==='gastos'?'on':''}">Gastos</button><button data-tab="saldos" class="${tab==='saldos'?'on':''}">Saldos</button></div>`;
+  <div class="tabs"><button data-tab="gastos" class="${tab==='gastos'?'on':''}">Gastos</button><button data-tab="saldos" class="${tab==='saldos'?'on':''}">Saldos</button><button data-tab="resumen" class="${tab==='resumen'?'on':''}">Resumen</button></div>`;
   if(tab==='gastos'){
     h+=t.expenses.length?[...t.expenses].reverse().map(e=>{
-      return `<div class="card row" data-e="${e.id}" style="cursor:pointer"><div><div class="b">${esc(e.desc)}</div><div class="mu">Pagó ${esc(name(t,e.payer))} · ${esc(debtText(t,e))}</div></div><div class="b">${fmt(e.amt,t)}</div></div>`}).join(''):'<div class="empty">Sin gastos todavía.</div>';
+      return `<div class="card row" data-e="${e.id}" style="cursor:pointer"><div><div class="b">${e.cat?catIcon(e.cat)+' ':''}${esc(e.desc)}</div><div class="mu">Pagó ${esc(name(t,e.payer))} · ${esc(debtText(t,e))}</div></div><div class="b">${fmt(e.amt,t)}</div></div>`}).join(''):'<div class="empty">Sin gastos todavía.</div>';
     h+='<button class="p fab" id="ne">+ Gasto</button>';
-  }else{
+  }else if(tab==='resumen'){h+=resumen(t)}else{
     const b=balances(t),st=settle(t);
     h+='<div class="card"><div class="mu" style="margin-bottom:6px">Balance por persona</div>'+t.people.map(p=>`<div class="row"><span>${esc(p.name)}</span><span class="b ${b[p.id]>0?'ok':b[p.id]<0?'bad':''}">${b[p.id]>0?'le deben ':b[p.id]<0?'debe ':''}${fmt(Math.abs(b[p.id]),t)}</span></div>`).join('')+'</div>';
     h+='<div class="card"><div class="mu" style="margin-bottom:6px">Para saldar</div>'+(st.length?st.map(s=>`<div class="row"><span>${esc(name(t,s.from))} → ${esc(name(t,s.to))}</span><span class="b">${fmt(s.v,t)}</span></div>`).join(''):'<div>Están a mano ✔</div>')+'</div>';
@@ -194,6 +208,26 @@ function render(){
   document.querySelectorAll('[data-e]').forEach(el=>el.onclick=()=>expDialog(el.dataset.e));
   $('#ne')&&($('#ne').onclick=()=>expDialog());
   $('#sh')&&($('#sh').onclick=shareSummary);
+  $('#ac')&&($('#ac').onclick=()=>{
+    if(t.code&&!sync)return alert('La sincronización todavía no está lista. Probá de nuevo en unos segundos.');
+    t.expenses.forEach(e=>{if(!e.cat){const c=guessCat(e.desc);if(c){e.cat=c;t.code&&remoteSave(t,e)}}});save();render();
+  });
+}
+function resumen(t){
+  const tot=t.expenses.reduce((a,e)=>a+e.amt,0);
+  if(!tot)return '<div class="empty">Sin gastos todavía.</div>';
+  const g={};t.expenses.forEach(e=>{const c=e.cat||'';(g[c]=g[c]||[]).push(e)});
+  const rows=Object.entries(g).map(([c,es])=>({c,es,v:es.reduce((a,e)=>a+e.amt,0)})).sort((a,b)=>b.v-a.v),max=rows[0].v;
+  let h='<div class="card"><div class="mu" style="margin-bottom:8px">Gastos por categoría · tocá una para ver el detalle</div>'+rows.map(r=>`<details class="cat"><summary>
+    <div class="row"><span style="min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${catIcon(r.c)} ${esc(r.c||'Sin categoría')} <span class="mu">· ${r.es.length}</span></span><span style="white-space:nowrap"><span class="b">${fmt(r.v,t)}</span> <span class="mu">${r.v*100/tot<1?'<1':Math.round(r.v*100/tot)}%</span></span></div>
+    <div class="bar"><i style="width:${(r.v/max*100).toFixed(1)}%"></i></div></summary>
+    ${[...r.es].sort((a,b)=>b.amt-a.amt).map(e=>`<div class="row mu" style="padding:2px 0 2px 26px"><span>${esc(e.desc)}</span><span>${fmt(e.amt,t)}</span></div>`).join('')}<div style="height:8px"></div></details>`).join('')+'</div>';
+  const unc=t.expenses.filter(e=>!e.cat&&guessCat(e.desc)).length;
+  if(unc)h+=`<button id="ac" style="width:100%">✨ Categorizar automáticamente ${unc} gasto${unc>1?'s':''}</button>`;
+  const paid={},cons={};t.people.forEach(p=>{paid[p.id]=0;cons[p.id]=0});
+  t.expenses.forEach(e=>{if(paid[e.payer]!==undefined)paid[e.payer]+=e.amt;shares(e).forEach(x=>{if(cons[x.p]!==undefined)cons[x.p]+=x.v})});
+  h+='<div class="card"><div class="row mu" style="margin-bottom:6px"><span>Por persona</span><span>Pagó · Le corresponde</span></div>'+t.people.map(p=>`<div class="row"><span>${esc(p.name)}</span><span><span class="b">${fmt(paid[p.id],t)}</span> · ${fmt(cons[p.id],t)}</span></div>`).join('')+'</div>';
+  return h;
 }
 
 // ---- diálogos ----
@@ -224,10 +258,13 @@ function expDialog(id){
   let payer=e?e.payer:(t.people.some(p=>p.id===lp)?lp:t.people[0].id);
   let parts=new Set(e?e.parts:t.people.map(p=>p.id));
   let custom=!!e?.split;
+  let cat=e?.cat||'',catTouched=!!e?.cat,otra=false;
   const cv={};if(e?.split)t.people.forEach(p=>cv[p.id]=e.split[p.id]?c2s(e.split[p.id]):'');
   const d=open(`<h3 style="margin:0">${e?'Editar gasto':'Nuevo gasto'}</h3>
   <label>Monto</label><input id="a" inputmode="decimal" placeholder="0,00" value="${e?c2s(e.amt):''}">
   <label>Concepto</label><input id="d" value="${e?esc(e.desc):''}">
+  <label>Categoría</label><div class="chips" id="ct"></div>
+  <input id="co" maxlength="40" placeholder="Nombre de la nueva categoría" style="display:none;margin-top:6px">
   <label>Pagó</label><div class="chips" id="pw"></div>
   <div class="row" style="margin-top:12px"><span class="mu">Reparto</span><button class="chip" id="md"></button></div>
   <div id="ch" style="margin-top:8px"></div>
@@ -266,6 +303,15 @@ function expDialog(id){
     if(custom){const a=amtNow();const sh=!isNaN(a)&&parts.size?shares({amt:a,payer,parts:[...parts]}):[];t.people.forEach(p=>{const s=sh.find(x=>x.p===p.id);cv[p.id]=s?c2s(s.v):''})}
     paint();
   };
+  const paintCats=()=>{
+    const ct=d.querySelector('#ct'),co=d.querySelector('#co');
+    ct.innerHTML=tripCats(t).map(c=>`<button class="chip ${!otra&&cat===c?'on':''}" data-c="${esc(c)}">${catIcon(c)} ${esc(c)}</button>`).join('')+`<button class="chip ${otra?'on':''}" id="otra">📦 Otra…</button>`;
+    ct.querySelectorAll('[data-c]').forEach(b=>b.onclick=()=>{cat=cat===b.dataset.c?'':b.dataset.c;catTouched=true;otra=false;paintCats()});
+    ct.querySelector('#otra').onclick=()=>{otra=!otra;catTouched=true;paintCats();if(otra)co.focus()};
+    co.style.display=otra?'block':'none';
+  };
+  d.querySelector('#d').oninput=()=>{if(!catTouched){cat=guessCat(d.querySelector('#d').value);paintCats()}};
+  paintCats();
   d.querySelector('#a').oninput=preview;paint();
   if(!e)setTimeout(()=>d.querySelector('#a').focus(),50);
   d.querySelector('#x').onclick=close;
@@ -274,7 +320,13 @@ function expDialog(id){
     const amt=amtNow(),desc=d.querySelector('#d').value.trim();
     if(isNaN(amt))return alert('Monto inválido');
     if(!desc)return alert('Falta el concepto');
+    if(otra){
+      const nc=d.querySelector('#co').value.trim();
+      if(!nc)return alert('Escribí el nombre de la nueva categoría');
+      cat=tripCats(t).find(c=>norm(c)===norm(nc))||nc;
+    }
     const o={id:e?e.id:uid(),amt,desc,payer,date:e?e.date:Date.now()};
+    if(cat)o.cat=cat;
     if(custom){
       const r=customVals();if(!r)return alert('Hay un monto inválido en el reparto');
       const sum=Object.values(r).reduce((x,y)=>x+y,0);
@@ -307,7 +359,7 @@ function parseSheet(t,txt){
     if(!p)return out.push({line,err:`No reconozco quién pagó ("${c[2]||''}")`});
     const other=t.people.find(x=>x.id!==p.id);
     const o4=parseAmt(c[3]||''),o5=parseAmt(c[4]||''),owed=!isNaN(o4)?o4:o5;
-    const e={id:uid(),amt,desc,payer:p.id};
+    const e={id:uid(),amt,desc,payer:p.id};const gc=guessCat(desc);if(gc)e.cat=gc;
     if(isNaN(owed))e.parts=c.length>=4?[p.id]:[A.id,B.id];
     else if(owed>amt)return out.push({line,err:'La deuda es mayor que el monto'});
     else if(owed===amt)e.parts=[other.id];
@@ -360,7 +412,7 @@ function menuDialog(){
   d.querySelector('#sy')&&(d.querySelector('#sy').onclick=()=>{enableSync(t);render();codeDialog(t)});
   d.querySelector('#csv').onclick=()=>{
     const q=s=>'"'+String(s).replace(/"/g,'""')+'"';
-    const rows=[['Monto','Concepto','Pagó','Deuda'],...t.expenses.map(e=>[c2s(e.amt),e.desc,name(t,e.payer),debtText(t,e)])];
+    const rows=[['Monto','Concepto','Categoría','Pagó','Deuda'],...t.expenses.map(e=>[c2s(e.amt),e.desc,e.cat||'',name(t,e.payer),debtText(t,e)])];
     download(t.name+'.csv',rows.map(r=>r.map(q).join(',')).join('\n'),'text/csv');close();
   };
   d.querySelector('#js').onclick=()=>{download(t.name+'.json',JSON.stringify(t),'application/json');close()};

@@ -13,11 +13,12 @@ service cloud.firestore {
       match /expenses/{id} {
         allow read, delete: if esElViaje(code);
         allow create, update: if esElViaje(code)
-          && request.resource.data.keys().hasOnly(['amt','desc','payer','parts','date','split'])
+          && request.resource.data.keys().hasOnly(['amt','desc','payer','parts','date','split','cat'])
           && request.resource.data.amt is int && request.resource.data.amt > 0
           && request.resource.data.desc is string && request.resource.data.desc.size() <= 200
           && request.resource.data.parts is list && request.resource.data.parts.size() <= 20
-          && (!('split' in request.resource.data) || request.resource.data.split is map);
+          && (!('split' in request.resource.data) || request.resource.data.split is map)
+          && (!('cat' in request.resource.data) || (request.resource.data.cat is string && request.resource.data.cat.size() <= 40));
       }
     }
   }
