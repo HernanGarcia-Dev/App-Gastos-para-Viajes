@@ -231,6 +231,7 @@ function validExp(t,e){
   if(typeof e.date!=='number')e.date=0;
   return true;
 }
+const authMsg=c=>c==='auth/admin-restricted-operation'||c==='auth/operation-not-allowed'?'Falta activar el acceso Anónimo en Firebase (Authentication → Anónimo)':c==='auth/network-request-failed'||!c?'Sin conexión para identificar este celular':'No se pudo identificar este celular ('+c+')';
 const whoName=(t,x)=>t.people.find(p=>p.id===x)?.name||x||'?';
 async function joinTrip(raw){
   const c=cleanCode(raw);
@@ -265,7 +266,7 @@ function render(){
   const st0=settle(t);
   let h=`<div class="card"><div class="row"><span class="mu">Total gastado</span><span class="b">${fmt(tot,t)}</span></div>
   ${st0.length?st0.map(s=>`<div class="row" style="margin-top:6px;font-size:17px"><span>${esc(name(t,s.from))} le debe a ${esc(name(t,s.to))}</span><span class="b bad">${fmt(s.v,t)}</span></div>`).join(''):'<div style="margin-top:6px">Están a mano ✔</div>'}</div>
-  ${t.code&&!(locked&&!freePeople(t).length)?`<div class="mu" style="text-align:center">☁️ ${!sync?'Sincronización no disponible':!sync.uid?'No se pudo identificar este celular ('+esc(sync.authErr||'sin conexión')+')':!navigator.onLine?'Sin conexión · se sincroniza al volver':serr[t.code]?'Error de conexión ('+esc(serr[t.code])+') · reintentando…':pend[t.code]?'Pendiente de sincronizar…':live[t.code]?'Sincronizado en vivo':'Conectando…'}</div>`:''}
+  ${t.code&&!(locked&&!freePeople(t).length)?`<div class="mu" style="text-align:center">☁️ ${!sync?'Sincronización no disponible':!sync.uid?esc(authMsg(sync.authErr)):!navigator.onLine?'Sin conexión · se sincroniza al volver':serr[t.code]?'Error de conexión ('+esc(serr[t.code])+') · reintentando…':pend[t.code]?'Pendiente de sincronizar…':live[t.code]?'Sincronizado en vivo':'Conectando…'}</div>`:''}
   ${locked&&!freePeople(t).length?'<div class="card bad">🔒 Todas las personas de este viaje ya están registradas en otros celulares. Este celular no tiene acceso.</div>':''}
   ${t.bad?`<div class="card bad" style="font-size:13px">⚠️ Se ignoraron ${t.bad} gasto${t.bad>1?'s':''} con datos inválidos.</div>`:''}
   <div class="tabs"><button data-tab="gastos" class="${tab==='gastos'?'on':''}">Gastos</button><button data-tab="saldos" class="${tab==='saldos'?'on':''}">Saldos</button><button data-tab="resumen" class="${tab==='resumen'?'on':''}">Resumen</button></div>`;
@@ -426,7 +427,7 @@ function menuDialog(){
 function meDialog(t){
   const m=mine(t);
   if(m){const d=open(`<h3 style="margin:0">👤 ${esc(name(t,m))} 🔒</h3><p>Este celular está registrado como <b>${esc(name(t,m))}</b>. No se puede cambiar, y nadie más puede registrarse como ${esc(name(t,m))}.</p><div class="acts"><button id="x">Cerrar</button></div>`);d.querySelector('#x').onclick=close;return}
-  if(!sync||!srvClaims[t.code]){const d=open('<h3 style="margin:0">¿Quién sos?</h3><p>Necesitás conexión a internet para registrar este celular.</p><div class="acts"><button id="x">Cerrar</button></div>');d.querySelector('#x').onclick=close;return}
+  if(!sync||!sync.uid||!srvClaims[t.code]){const d=open('<h3 style="margin:0">¿Quién sos?</h3><p>'+esc(sync&&!sync.uid?authMsg(sync.authErr):'Necesitás conexión a internet para registrar este celular.')+'</p><div class="acts"><button id="x">Cerrar</button></div>');d.querySelector('#x').onclick=close;return}
   const d=open(`<h3 style="margin:0">¿Quién sos?</h3>
   <p class="mu">Este celular queda registrado como esa persona <b>para siempre</b>: nadie más va a poder registrarse con ese nombre, y solo los celulares registrados pueden ver y cargar gastos.</p>
   <div class="chips">${t.people.map(p=>t.claims?.[p.id]?`<button class="chip" disabled style="opacity:.5">🔒 ${esc(p.name)}</button>`:`<button class="chip" data-m="${p.id}">${esc(p.name)}</button>`).join('')}</div>
