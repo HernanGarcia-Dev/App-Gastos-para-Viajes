@@ -17,4 +17,9 @@ En el viaje: menú ⋯ → **Importar desde planilla**. Copiá las filas de Goog
 ## Modo un solo viaje
 `SOLO_UN_VIAJE=true` en `index.html` oculta la creación de viajes. En `firestore.rules` reemplazá `CODIGO_DEL_VIAJE` por el ID del viaje **solo en la consola de Firebase** (no en el repo): así nadie puede crear viajes ni acceder a otro.
 
+## Protección de datos
+- Nada se borra de verdad: los gastos borrados van a la **Papelera** (menú ⋯) y se restauran.
+- Cada cambio deja una entrada en el **historial** (inmutable); desde un gasto → **Historial** se puede volver a cualquier versión.
+- Las reglas de Firestore rechazan datos inválidos y la app ignora cualquier gasto mal formado en vez de romperse.
+
 Seguridad: no hay login. Cada viaje se identifica con un código aleatorio de 20 caracteres; las reglas impiden listar viajes, así que solo accede quien tenga el código.

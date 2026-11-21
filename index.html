@@ -145,7 +145,12 @@ function subscribe(t){
     t.name=d.name;t.cur=d.cur;t.people=d.people;save();render();
   },onErr);
   u2=fs.onSnapshot(fs.collection(db,'trips',c,'expenses'),{includeMetadataChanges:true},snap=>{
-    t.expenses=snap.docs.map(x=>({id:x.id,...x.data()})).sort((a,b)=>a.date-b.date);
+    const all=snap.docs.map(x=>{const d=x.data({serverTimestamps:'estimate'});return {...d,id:x.id,at:d.at?.toMillis?.()??null}});
+    const ok=all.filter(e=>validExp(t,e));
+    t.expenses=ok.filter(e=>!e.del).sort((a,b)=>a.date-b.date);
+    t.trash=ok.filter(e=>e.del).sort((a,b)=>(b.at||0)-(a.at||0));
+    t.bad=all.length-ok.length;
+    if(!snap.metadata.fromCache&&!snap.metadata.hasPendingWrites)backfill(t);
     pend[c]=snap.metadata.hasPendingWrites;live[c]=!snap.metadata.fromCache;delete serr[c];save();render();
   },onErr);
   subs[c]=stop;
@@ -160,16 +165,40 @@ function kick(){
 }
 let failAt=0;
 const fail=e=>{console.error('Error de sincronización',e);if(Date.now()-failAt>5000){failAt=Date.now();alert('No se pudo guardar en la nube ('+(e.code||e.message)+').')}};
-function remoteSave(t,e,c=t.code){
+function remoteSave(t,e,act='save',c=t.code){
   const {db,fs}=sync;
-  const o={amt:e.amt,desc:e.desc,payer:e.payer,parts:e.parts,date:e.date};if(e.split)o.split=e.split;if(e.cat)o.cat=e.cat;
-  fs.setDoc(fs.doc(db,'trips',c,'expenses',e.id),o).catch(fail);
+  const o={amt:e.amt,desc:e.desc,payer:e.payer,parts:e.parts,date:e.date};
+  if(e.split)o.split=e.split;if(e.cat)o.cat=e.cat;if(e.del)o.del=true;
+  const by=meName(t),hr=fs.doc(fs.collection(db,'trips',c,'history')),b=fs.writeBatch(db);
+  b.set(hr,{exp:e.id,act,data:o,by,at:fs.serverTimestamp()});
+  b.set(fs.doc(db,'trips',c,'expenses',e.id),{...o,by,at:fs.serverTimestamp(),h:hr.id});
+  b.commit().catch(fail);
 }
-function remoteDel(t,id){const {db,fs}=sync;fs.deleteDoc(fs.doc(db,'trips',t.code,'expenses',id)).catch(fail)}
+// Gastos cargados antes del historial: se respaldan una vez (queda una versión restaurable de cada uno).
+const backed={};
+function backfill(t){
+  if(backed[t.code]||!S.me?.[t.id])return;backed[t.code]=true;
+  [...t.expenses,...(t.trash||[])].filter(e=>!e.h).forEach(e=>remoteSave(t,e,'backup'));
+}
+// Descarta gastos con datos inválidos en vez de romper los cálculos.
+function validExp(t,e){
+  const ids=new Set(t.people.map(p=>p.id)),isI=x=>Number.isInteger(x);
+  if(!isI(e.amt)||e.amt<=0||e.amt>1e8||typeof e.desc!=='string'||!ids.has(e.payer))return false;
+  if(!Array.isArray(e.parts)||!e.parts.length||!e.parts.every(p=>ids.has(p)))return false;
+  if(e.split!=null){
+    if(typeof e.split!=='object')return false;
+    const v=Object.entries(e.split);
+    if(!v.length||!v.every(([k,x])=>ids.has(k)&&isI(x)&&x>=0)||v.reduce((s,[,x])=>s+x,0)!==e.amt)return false;
+  }
+  if(e.cat!=null&&typeof e.cat!=='string')return false;
+  if(typeof e.date!=='number')e.date=0;
+  return true;
+}
+const meName=t=>name(t,S.me?.[t.id]).slice(0,40);
 function enableSync(t){
   const {db,fs}=sync,c=genCode();
   fs.setDoc(fs.doc(db,'trips',c),{name:t.name,cur:t.cur,people:t.people,createdAt:Date.now()}).catch(fail);
-  t.expenses.forEach(e=>remoteSave(t,e,c));
+  t.expenses.forEach(e=>remoteSave(t,e,'save',c));
   t.code=c;save();subscribe(t);
 }
 async function joinTrip(raw){
@@ -197,6 +226,7 @@ function render(){
     $('#nt')&&($('#nt').onclick=tripDialog);return;
   }
   if(S.last!==t.id){S.last=t.id;save()}
+  if(t.code&&!S.me?.[t.id]&&!$('#dlg').open)setTimeout(()=>meDialog(t),0);
   $('#hd').innerHTML=`<button class="ic" id="bk">←</button><h1>${esc(t.name)}</h1><button class="ic" id="mn">⋯</button>`;
   $('#bk').onclick=()=>{view=null;render()};$('#mn').onclick=menuDialog;
   const tot=t.expenses.reduce((a,e)=>a+e.amt,0);
@@ -204,6 +234,7 @@ function render(){
   let h=`<div class="card"><div class="row"><span class="mu">Total gastado</span><span class="b">${fmt(tot,t)}</span></div>
   ${st0.length?st0.map(s=>`<div class="row" style="margin-top:6px;font-size:17px"><span>${esc(name(t,s.from))} le debe a ${esc(name(t,s.to))}</span><span class="b bad">${fmt(s.v,t)}</span></div>`).join(''):'<div style="margin-top:6px">Están a mano ✔</div>'}</div>
   ${t.code?`<div class="mu" style="text-align:center">☁️ ${!sync?'Sincronización no disponible':!navigator.onLine?'Sin conexión · se sincroniza al volver':serr[t.code]?'Error de conexión ('+esc(serr[t.code])+') · reintentando…':pend[t.code]?'Pendiente de sincronizar…':live[t.code]?'Sincronizado en vivo':'Conectando…'}</div>`:''}
+  ${t.bad?`<div class="card bad" style="font-size:13px">⚠️ Se ignoraron ${t.bad} gasto${t.bad>1?'s':''} con datos inválidos.</div>`:''}
   <div class="tabs"><button data-tab="gastos" class="${tab==='gastos'?'on':''}">Gastos</button><button data-tab="saldos" class="${tab==='saldos'?'on':''}">Saldos</button><button data-tab="resumen" class="${tab==='resumen'?'on':''}">Resumen</button></div>`;
   if(tab==='gastos'){
     h+=t.expenses.length?[...t.expenses].reverse().map(e=>{
@@ -267,7 +298,8 @@ function expDialog(id){
   const t=trip(),e=id?t.expenses.find(x=>x.id===id):null;
   if(t.code&&!sync)return alert('La sincronización todavía no está lista. Probá de nuevo en unos segundos.');
   const lp=S.lastPayer?.[t.id];
-  let payer=e?e.payer:(t.people.some(p=>p.id===lp)?lp:t.people[0].id);
+  const me=S.me?.[t.id],ok1=x=>t.people.some(p=>p.id===x);
+  let payer=e?e.payer:ok1(me)?me:ok1(lp)?lp:t.people[0].id;
   let parts=new Set(e?e.parts:t.people.map(p=>p.id));
   let custom=!!e?.split;
   let cat=e?.cat||'',catTouched=!!e?.cat,otra=false;
@@ -281,7 +313,9 @@ function expDialog(id){
   <div class="row" style="margin-top:12px"><span class="mu">Reparto</span><button class="chip" id="md"></button></div>
   <div id="ch" style="margin-top:8px"></div>
   <div class="mu" id="pv" style="margin-top:8px"></div>
-  <div class="acts">${e?'<button class="d" id="del">Borrar</button>':''}<button id="x">Cancelar</button><button class="p" id="ok">Guardar</button></div>`);
+  ${e&&e.by?`<div class="mu" style="margin-top:10px">Última edición: ${esc(e.by)}${e.at?' · '+new Date(e.at).toLocaleString('es-AR',{dateStyle:'short',timeStyle:'short'}):''}</div>`:''}
+  <div class="acts">${e?'<button class="d" id="del">Borrar</button>':''}${e&&t.code?'<button id="hi">Historial</button>':''}<button id="x">Cancelar</button><button class="p" id="ok">Guardar</button></div>`);
+  d.querySelector('#hi')&&(d.querySelector('#hi').onclick=()=>historyDialog(t,e));
   const amtNow=()=>parseAmt(d.querySelector('#a').value);
   const customVals=()=>{const r={};for(const p of t.people){const raw=(cv[p.id]||'').trim();if(!raw){r[p.id]=0;continue}const v=parseAmt(raw);if(isNaN(v))return null;r[p.id]=v}return r};
   const preview=()=>{
@@ -327,10 +361,16 @@ function expDialog(id){
   d.querySelector('#a').oninput=preview;paint();
   if(!e)setTimeout(()=>d.querySelector('#a').focus(),50);
   d.querySelector('#x').onclick=close;
-  if(e)d.querySelector('#del').onclick=()=>{if(confirm('¿Borrar este gasto?')){t.expenses=t.expenses.filter(x=>x.id!==id);t.code&&sync&&remoteDel(t,id);save();close();render()}};
+  if(e)d.querySelector('#del').onclick=()=>{
+    if(!confirm(t.code?'¿Mandar este gasto a la papelera? Se puede restaurar.':'¿Borrar este gasto?'))return;
+    t.expenses=t.expenses.filter(x=>x.id!==id);
+    if(t.code){const x={...e,del:true};t.trash=[x,...(t.trash||[])];remoteSave(t,x,'del')}
+    save();close();render();
+  };
   d.querySelector('#ok').onclick=()=>{
     const amt=amtNow(),desc=d.querySelector('#d').value.trim();
     if(isNaN(amt))return alert('Monto inválido');
+    if(amt>1e8)return alert('Monto demasiado grande');
     if(!desc)return alert('Falta el concepto');
     if(otra){
       const nc=d.querySelector('#co').value.trim();
@@ -416,10 +456,13 @@ function menuDialog(){
   const t=trip();
   const d=open(`<h3 style="margin:0">${esc(t.name)}</h3><div style="display:grid;gap:8px;margin-top:12px">
   <button id="ip">📋 Importar desde planilla</button>
+  ${t.code?`<button id="tr">🗑️ Papelera (${(t.trash||[]).length})</button><button id="me">👤 Este celular es de: ${esc(meName(t)||'?')}</button>`:''}
   ${t.code?'<button id="cd">☁️ Compartir código del viaje</button>':sync&&!SOLO_UN_VIAJE?'<button id="sy">☁️ Sincronizar entre celulares</button>':''}
   <button id="csv">Exportar CSV</button><button id="js">Exportar viaje (JSON)</button><button class="d" id="dt">${t.code?'Quitar de este celular':'Borrar viaje'}</button><button id="x">Cerrar</button></div>`);
   d.querySelector('#x').onclick=close;
   d.querySelector('#ip').onclick=importDialog;
+  d.querySelector('#tr')&&(d.querySelector('#tr').onclick=()=>trashDialog(t));
+  d.querySelector('#me')&&(d.querySelector('#me').onclick=()=>meDialog(t));
   d.querySelector('#cd')&&(d.querySelector('#cd').onclick=()=>codeDialog(t));
   d.querySelector('#sy')&&(d.querySelector('#sy').onclick=()=>{enableSync(t);render();codeDialog(t)});
   d.querySelector('#csv').onclick=()=>{
@@ -432,6 +475,49 @@ function menuDialog(){
     const msg=t.code?'¿Quitar el viaje de este celular? Los datos siguen en la nube y podés volver a unirte con el código.':'¿Borrar el viaje y todos sus gastos?';
     if(confirm(msg)){if(t.code){subs[t.code]?.();delete subs[t.code]}S.trips=S.trips.filter(x=>x.id!==t.id);save();view=null;close();render()}
   };
+}
+function meDialog(t){
+  const d=open(`<h3 style="margin:0">¿De quién es este celular?</h3>
+  <p class="mu">Se usa para registrar quién carga o edita cada gasto, y como "Pagó" por defecto.</p>
+  <div class="chips">${t.people.map(p=>`<button class="chip ${S.me?.[t.id]===p.id?'on':''}" data-m="${p.id}">${esc(p.name)}</button>`).join('')}</div>`);
+  d.querySelectorAll('[data-m]').forEach(b=>b.onclick=()=>{S.me={...S.me,[t.id]:b.dataset.m};save();close();render();backfill(t)});
+}
+function trashDialog(t){
+  const tr=t.trash||[];
+  const d=open(`<h3 style="margin:0">🗑️ Papelera</h3>
+  <div style="max-height:55vh;overflow:auto;margin-top:8px">${tr.length?tr.map(e=>`<div class="card"><div class="row"><span class="b">${esc(e.desc)}</span><span class="b">${fmt(e.amt,t)}</span></div>
+    <div class="row"><span class="mu">Borró ${esc(e.by||'?')}${e.at?' · '+new Date(e.at).toLocaleString('es-AR',{dateStyle:'short',timeStyle:'short'}):''}</span><button data-r="${e.id}">Restaurar</button></div></div>`).join(''):'<div class="empty">Vacía</div>'}</div>
+  <div class="acts"><button id="x">Cerrar</button></div>`);
+  d.querySelector('#x').onclick=close;
+  d.querySelectorAll('[data-r]').forEach(b=>b.onclick=()=>{
+    const e=tr.find(x=>x.id===b.dataset.r);if(!e)return;
+    const x={...e};delete x.del;
+    t.trash=tr.filter(y=>y!==e);t.expenses.push(x);t.expenses.sort((a,b)=>a.date-b.date);
+    remoteSave(t,x,'restore');save();close();render();
+  });
+}
+async function historyDialog(t,e){
+  if(!sync)return;
+  const {db,fs}=sync,ACT={save:'Guardó',del:'Borró',restore:'Restauró',backup:'Respaldo inicial'};
+  const d=open('<h3 style="margin:0">Historial</h3><div class="mu" style="margin-top:8px">Cargando…</div>');
+  let hs;
+  try{hs=(await fs.getDocs(fs.query(fs.collection(db,'trips',t.code,'history'),fs.where('exp','==',e.id)))).docs
+    .map(x=>{const v=x.data({serverTimestamps:'estimate'});return {...v,at:v.at?.toMillis?.()??0}}).sort((a,b)=>b.at-a.at)}
+  catch(err){console.warn(err);d.innerHTML='<p>No se pudo cargar el historial. Revisá la conexión.</p><div class="acts"><button id="x">Cerrar</button></div>';d.querySelector('#x').onclick=close;return}
+  d.innerHTML=`<h3 style="margin:0">Historial</h3><div style="max-height:55vh;overflow:auto;margin-top:8px">${hs.map((h,i)=>{const v=h.data||{};const ok=validExp(t,{...v});
+    return `<div class="card"><div class="mu">${ACT[h.act]||esc(h.act)} ${esc(h.by||'?')} · ${h.at?new Date(h.at).toLocaleString('es-AR',{dateStyle:'short',timeStyle:'short'}):''}</div>
+    <div class="row"><span>${esc(v.desc||'')}${v.del?' (borrado)':''}</span><span class="b">${ok?fmt(v.amt,t):'datos inválidos'}</span></div>
+    ${ok?`<div class="mu">Pagó ${esc(name(t,v.payer))} · ${esc(debtText(t,v))}</div>`:''}
+    ${i>0&&ok&&!v.del?`<div style="text-align:right;margin-top:6px"><button data-v="${i}">Restaurar esta versión</button></div>`:''}</div>`}).join('')||'<div class="empty">Sin historial</div>'}</div>
+  <div class="acts"><button id="x">Cerrar</button></div>`;
+  d.querySelector('#x').onclick=close;
+  d.querySelectorAll('[data-v]').forEach(b=>b.onclick=()=>{
+    if(!confirm('¿Volver a esta versión del gasto?'))return;
+    const v=hs[+b.dataset.v].data,x={id:e.id,amt:v.amt,desc:v.desc,payer:v.payer,parts:v.parts,date:v.date};
+    if(v.split)x.split=v.split;if(v.cat)x.cat=v.cat;
+    t.expenses=t.expenses.filter(y=>y.id!==e.id).concat(x).sort((a,b)=>a.date-b.date);t.trash=(t.trash||[]).filter(y=>y.id!==e.id);
+    remoteSave(t,x,'restore');save();close();render();
+  });
 }
 function codeDialog(t){
   const link=location.origin+location.pathname+'#join='+t.code;
