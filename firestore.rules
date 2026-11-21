@@ -1,24 +1,23 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Cada viaje se identifica con un código aleatorio de 20 caracteres (no se puede listar ni adivinar).
+    // ÚNICO viaje permitido. En la consola de Firebase reemplazá CODIGO_DEL_VIAJE por el ID
+    // del documento de tu viaje (Firestore Database → Datos → colección "trips").
+    // No lo subas al repo: así, aunque alguien tenga la config de Firebase, sin el código no puede hacer nada.
+    function esElViaje(code) { return code == 'CODIGO_DEL_VIAJE'; }
+
     match /trips/{code} {
-      allow get: if code.size() >= 16;
-      allow list: if false;
-      allow create, update: if code.size() >= 16
-        && request.resource.data.keys().hasOnly(['name','cur','people','createdAt'])
-        && request.resource.data.name is string && request.resource.data.name.size() <= 100
-        && request.resource.data.cur is string && request.resource.data.cur.size() <= 5
-        && request.resource.data.people is list && request.resource.data.people.size() <= 20;
-      allow delete: if false;
+      allow get: if esElViaje(code);
+      allow list, create, update, delete: if false;   // nadie puede crear ni modificar viajes
 
       match /expenses/{id} {
-        allow read, delete: if code.size() >= 16;
-        allow create, update: if code.size() >= 16
-          && request.resource.data.keys().hasOnly(['amt','desc','payer','parts','date'])
+        allow read, delete: if esElViaje(code);
+        allow create, update: if esElViaje(code)
+          && request.resource.data.keys().hasOnly(['amt','desc','payer','parts','date','split'])
           && request.resource.data.amt is int && request.resource.data.amt > 0
           && request.resource.data.desc is string && request.resource.data.desc.size() <= 200
-          && request.resource.data.parts is list && request.resource.data.parts.size() <= 20;
+          && request.resource.data.parts is list && request.resource.data.parts.size() <= 20
+          && (!('split' in request.resource.data) || request.resource.data.split is map);
       }
     }
   }

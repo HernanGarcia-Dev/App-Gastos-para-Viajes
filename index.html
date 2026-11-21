@@ -28,7 +28,7 @@ button.d{color:var(--bad)}
 dialog{background:var(--card);color:var(--tx);border:1px solid var(--line);border-radius:14px;width:min(92vw,440px);padding:16px}
 dialog::backdrop{background:#0009}
 label{display:block;margin:10px 0 4px;font-size:13px;color:var(--mu)}
-input,select{width:100%;font:inherit;color:var(--tx);background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:10px}
+input,select,textarea{width:100%;font:inherit;color:var(--tx);background:var(--bg);border:1px solid var(--line);border-radius:10px;padding:10px}
 .chips{display:flex;flex-wrap:wrap;gap:6px}
 .chip{border-radius:20px;padding:6px 12px}.chip.on{background:var(--ac);border-color:var(--ac);color:#fff}
 .acts{display:flex;gap:8px;justify-content:flex-end;margin-top:16px}
@@ -41,6 +41,8 @@ input,select{width:100%;font:inherit;color:var(--tx);background:var(--bg);border
 <dialog id="dlg"></dialog>
 <script>
 const KEY='gastos-viaje-v1';
+// true: la app no permite crear viajes nuevos, solo usar/unirse al viaje existente.
+const SOLO_UN_VIAJE=true;
 let S=load(), view=null, tab='gastos';
 function load(){try{return JSON.parse(localStorage.getItem(KEY))||{trips:[]}}catch{return{trips:[]}}}
 function save(){try{localStorage.setItem(KEY,JSON.stringify(S))}catch{alert('No se pudo guardar en el dispositivo')}}
@@ -61,9 +63,20 @@ function parseAmt(s){
 }
 const fmt=(c,t)=>(c<0?'-':'')+(t?.cur||'$')+(Math.abs(c)/100).toLocaleString('es-AR',{minimumFractionDigits:2,maximumFractionDigits:2});
 function shares(e){
+  if(e.split)return Object.entries(e.split).filter(([,v])=>v>0).map(([p,v])=>({p,v}));
   const n=e.parts.length,base=Math.floor(e.amt/n);let rem=e.amt-base*n;
-  return e.parts.map(p=>({p,v:base+(rem-->0?1:0)}));
+  const order=[...e.parts.filter(p=>p!==e.payer),...e.parts.filter(p=>p===e.payer)],extra=new Set();
+  order.forEach(p=>{if(rem>0){extra.add(p);rem--}});
+  return e.parts.map(p=>({p,v:base+(extra.has(p)?1:0)}));
 }
+// Texto "Lu debe $X" para un gasto (lo que el resto le debe a quien pagó)
+function debtText(t,e){
+  const sh=shares(e),owed=e.amt-(sh.find(s=>s.p===e.payer)?.v||0);
+  if(owed<=0)return 'sin deuda';
+  const others=sh.filter(s=>s.p!==e.payer&&s.v>0);
+  return others.length===1?`${name(t,others[0].p)} debe ${fmt(owed,t)}`:`le deben ${fmt(owed,t)}`;
+}
+const c2s=c=>(c/100).toFixed(2).replace('.',',');
 function balances(t){
   const b={};t.people.forEach(p=>b[p.id]=0);
   t.expenses.forEach(e=>{if(b[e.payer]!==undefined)b[e.payer]+=e.amt;shares(e).forEach(s=>{if(b[s.p]!==undefined)b[s.p]-=s.v})});
@@ -119,10 +132,12 @@ function subscribe(t){
   },err=>console.warn(err));
   subs[c]=()=>{u1();u2()};
 }
-const fail=e=>console.error('Error de sincronización',e);
+let failAt=0;
+const fail=e=>{console.error('Error de sincronización',e);if(Date.now()-failAt>5000){failAt=Date.now();alert('No se pudo guardar en la nube ('+(e.code||e.message)+').')}};
 function remoteSave(t,e,c=t.code){
   const {db,fs}=sync;
-  fs.setDoc(fs.doc(db,'trips',c,'expenses',e.id),{amt:e.amt,desc:e.desc,payer:e.payer,parts:e.parts,date:e.date}).catch(fail);
+  const o={amt:e.amt,desc:e.desc,payer:e.payer,parts:e.parts,date:e.date};if(e.split)o.split=e.split;
+  fs.setDoc(fs.doc(db,'trips',c,'expenses',e.id),o).catch(fail);
 }
 function remoteDel(t,id){const {db,fs}=sync;fs.deleteDoc(fs.doc(db,'trips',t.code,'expenses',id)).catch(fail)}
 function enableSync(t){
@@ -149,22 +164,24 @@ async function joinTrip(raw){
 function render(){
   const t=view&&trip();if(view&&!t)view=null;
   if(!t){
-    $('#hd').innerHTML='<h1>✈️ Mis viajes</h1>'+(sync?'<button id="jn">Unirme</button>':'')+'<button id="imp">Importar</button>';
-    $('#imp').onclick=importJSON;$('#jn')&&($('#jn').onclick=()=>joinDialog());
-    $('#app').innerHTML=(S.trips.length?S.trips.map(x=>`<div class="card row" data-t="${x.id}" style="cursor:pointer"><div><div class="b">${x.code?'☁️ ':''}${esc(x.name)}</div><div class="mu">${x.people.map(p=>esc(p.name)).join(', ')} · ${x.expenses.length} gastos</div></div><div class="b">${fmt(x.expenses.reduce((a,e)=>a+e.amt,0),x)}</div></div>`).join(''):'<div class="empty">Todavía no hay viajes.<br>Creá el primero.</div>')+'<button class="p fab" id="nt">+ Nuevo viaje</button>';
+    $('#hd').innerHTML='<h1>✈️ Mis viajes</h1>'+(sync?'<button id="jn">Unirme</button>':'')+(SOLO_UN_VIAJE?'':'<button id="imp">Importar</button>');
+    $('#imp')&&($('#imp').onclick=importJSON);$('#jn')&&($('#jn').onclick=()=>joinDialog());
+    $('#app').innerHTML=(S.trips.length?S.trips.map(x=>`<div class="card row" data-t="${x.id}" style="cursor:pointer"><div><div class="b">${x.code?'☁️ ':''}${esc(x.name)}</div><div class="mu">${x.people.map(p=>esc(p.name)).join(', ')} · ${x.expenses.length} gastos</div></div><div class="b">${fmt(x.expenses.reduce((a,e)=>a+e.amt,0),x)}</div></div>`).join(''):SOLO_UN_VIAJE?'<div class="empty">Abrí el link del viaje que te compartieron,<br>o tocá <b>Unirme</b> y pegá el código.</div>':'<div class="empty">Todavía no hay viajes.<br>Creá el primero.</div>')+(SOLO_UN_VIAJE?'':'<button class="p fab" id="nt">+ Nuevo viaje</button>');
     document.querySelectorAll('[data-t]').forEach(el=>el.onclick=()=>{view=el.dataset.t;tab='gastos';render()});
-    $('#nt').onclick=tripDialog;return;
+    $('#nt')&&($('#nt').onclick=tripDialog);return;
   }
+  if(S.last!==t.id){S.last=t.id;save()}
   $('#hd').innerHTML=`<button class="ic" id="bk">←</button><h1>${esc(t.name)}</h1><button class="ic" id="mn">⋯</button>`;
   $('#bk').onclick=()=>{view=null;render()};$('#mn').onclick=menuDialog;
   const tot=t.expenses.reduce((a,e)=>a+e.amt,0);
-  let h=`<div class="card row"><span class="mu">Total gastado</span><span class="b">${fmt(tot,t)}</span></div>
+  const st0=settle(t);
+  let h=`<div class="card"><div class="row"><span class="mu">Total gastado</span><span class="b">${fmt(tot,t)}</span></div>
+  ${st0.length?st0.map(s=>`<div class="row" style="margin-top:6px;font-size:17px"><span>${esc(name(t,s.from))} le debe a ${esc(name(t,s.to))}</span><span class="b bad">${fmt(s.v,t)}</span></div>`).join(''):'<div style="margin-top:6px">Están a mano ✔</div>'}</div>
   ${t.code?`<div class="mu" style="text-align:center">☁️ ${!sync?'Sincronización no disponible':pend[t.code]?'Pendiente de sincronizar…':'Sincronizado'}</div>`:''}
   <div class="tabs"><button data-tab="gastos" class="${tab==='gastos'?'on':''}">Gastos</button><button data-tab="saldos" class="${tab==='saldos'?'on':''}">Saldos</button></div>`;
   if(tab==='gastos'){
     h+=t.expenses.length?[...t.expenses].reverse().map(e=>{
-      const all=e.parts.length===t.people.length;
-      return `<div class="card row" data-e="${e.id}" style="cursor:pointer"><div><div class="b">${esc(e.desc)}</div><div class="mu">Pagó ${esc(name(t,e.payer))} · ${all?'entre todos':'solo '+e.parts.map(p=>esc(name(t,p))).join(', ')}</div></div><div class="b">${fmt(e.amt,t)}</div></div>`}).join(''):'<div class="empty">Sin gastos todavía.</div>';
+      return `<div class="card row" data-e="${e.id}" style="cursor:pointer"><div><div class="b">${esc(e.desc)}</div><div class="mu">Pagó ${esc(name(t,e.payer))} · ${esc(debtText(t,e))}</div></div><div class="b">${fmt(e.amt,t)}</div></div>`}).join(''):'<div class="empty">Sin gastos todavía.</div>';
     h+='<button class="p fab" id="ne">+ Gasto</button>';
   }else{
     const b=balances(t),st=settle(t);
@@ -203,45 +220,147 @@ function tripDialog(){
 function expDialog(id){
   const t=trip(),e=id?t.expenses.find(x=>x.id===id):null;
   if(t.code&&!sync)return alert('La sincronización todavía no está lista. Probá de nuevo en unos segundos.');
+  const lp=S.lastPayer?.[t.id];
+  let payer=e?e.payer:(t.people.some(p=>p.id===lp)?lp:t.people[0].id);
   let parts=new Set(e?e.parts:t.people.map(p=>p.id));
+  let custom=!!e?.split;
+  const cv={};if(e?.split)t.people.forEach(p=>cv[p.id]=e.split[p.id]?c2s(e.split[p.id]):'');
   const d=open(`<h3 style="margin:0">${e?'Editar gasto':'Nuevo gasto'}</h3>
-  <label>Monto</label><input id="a" inputmode="decimal" placeholder="0,00" value="${e?(e.amt/100).toFixed(2).replace('.',','):''}">
+  <label>Monto</label><input id="a" inputmode="decimal" placeholder="0,00" value="${e?c2s(e.amt):''}">
   <label>Concepto</label><input id="d" value="${e?esc(e.desc):''}">
-  <label>Pagó</label><select id="w">${t.people.map(p=>`<option value="${p.id}" ${e&&e.payer===p.id?'selected':''}>${esc(p.name)}</option>`).join('')}</select>
-  <label>Se reparte entre</label><div class="chips" id="ch"></div>
+  <label>Pagó</label><div class="chips" id="pw"></div>
+  <div class="row" style="margin-top:12px"><span class="mu">Reparto</span><button class="chip" id="md"></button></div>
+  <div id="ch" style="margin-top:8px"></div>
   <div class="mu" id="pv" style="margin-top:8px"></div>
   <div class="acts">${e?'<button class="d" id="del">Borrar</button>':''}<button id="x">Cancelar</button><button class="p" id="ok">Guardar</button></div>`);
-  const paint=()=>{
-    d.querySelector('#ch').innerHTML=t.people.map(p=>`<button class="chip ${parts.has(p.id)?'on':''}" data-p="${p.id}">${esc(p.name)}</button>`).join('');
-    d.querySelectorAll('[data-p]').forEach(b=>b.onclick=()=>{parts.has(b.dataset.p)?parts.delete(b.dataset.p):parts.add(b.dataset.p);paint()});
-    const a=parseAmt(d.querySelector('#a').value);
-    d.querySelector('#pv').textContent=(!isNaN(a)&&parts.size)?'Cada uno: '+shares({amt:a,parts:[...parts]}).map(s=>name(t,s.p)+' '+fmt(s.v,t)).join(' · '):'';
+  const amtNow=()=>parseAmt(d.querySelector('#a').value);
+  const customVals=()=>{const r={};for(const p of t.people){const raw=(cv[p.id]||'').trim();if(!raw){r[p.id]=0;continue}const v=parseAmt(raw);if(isNaN(v))return null;r[p.id]=v}return r};
+  const preview=()=>{
+    const a=amtNow(),pv=d.querySelector('#pv');
+    if(isNaN(a)){pv.textContent='';return}
+    if(custom){
+      const r=customVals();if(!r){pv.textContent='Hay un monto inválido';return}
+      const sum=Object.values(r).reduce((x,y)=>x+y,0),dif=a-sum;
+      pv.textContent=dif===0?'✔ '+debtText(t,{amt:a,payer,split:r}):(dif>0?'Faltan ':'Sobran ')+fmt(Math.abs(dif),t);
+    }else if(parts.size){
+      const ex={amt:a,payer,parts:[...parts]};
+      pv.textContent='Cada uno '+fmt(shares(ex)[0].v,t)+' · '+debtText(t,ex);
+    }else pv.textContent='';
   };
-  d.querySelector('#a').oninput=paint;paint();
+  const paint=()=>{
+    d.querySelector('#pw').innerHTML=t.people.map(p=>`<button class="chip ${payer===p.id?'on':''}" data-w="${p.id}">${esc(p.name)}</button>`).join('');
+    d.querySelectorAll('[data-w]').forEach(b=>b.onclick=()=>{payer=b.dataset.w;paint()});
+    d.querySelector('#md').textContent=custom?'Montos distintos ⇄':'Partes iguales ⇄';
+    const ch=d.querySelector('#ch');
+    if(custom){
+      ch.innerHTML=t.people.map(p=>`<div class="row" style="margin:4px 0"><span>${esc(p.name)}</span><input data-s="${p.id}" inputmode="decimal" placeholder="0,00" style="width:55%" value="${esc(cv[p.id]||'')}"></div>`).join('');
+      ch.querySelectorAll('[data-s]').forEach(i=>i.oninput=()=>{cv[i.dataset.s]=i.value;preview()});
+    }else{
+      ch.innerHTML='<div class="chips">'+t.people.map(p=>`<button class="chip ${parts.has(p.id)?'on':''}" data-p="${p.id}">${esc(p.name)}</button>`).join('')+'</div>';
+      ch.querySelectorAll('[data-p]').forEach(b=>b.onclick=()=>{parts.has(b.dataset.p)?parts.delete(b.dataset.p):parts.add(b.dataset.p);paint()});
+    }
+    preview();
+  };
+  d.querySelector('#md').onclick=()=>{
+    custom=!custom;
+    if(custom){const a=amtNow();const sh=!isNaN(a)&&parts.size?shares({amt:a,payer,parts:[...parts]}):[];t.people.forEach(p=>{const s=sh.find(x=>x.p===p.id);cv[p.id]=s?c2s(s.v):''})}
+    paint();
+  };
+  d.querySelector('#a').oninput=preview;paint();
+  if(!e)setTimeout(()=>d.querySelector('#a').focus(),50);
   d.querySelector('#x').onclick=close;
   if(e)d.querySelector('#del').onclick=()=>{if(confirm('¿Borrar este gasto?')){t.expenses=t.expenses.filter(x=>x.id!==id);t.code&&sync&&remoteDel(t,id);save();close();render()}};
   d.querySelector('#ok').onclick=()=>{
-    const amt=parseAmt(d.querySelector('#a').value),desc=d.querySelector('#d').value.trim();
+    const amt=amtNow(),desc=d.querySelector('#d').value.trim();
     if(isNaN(amt))return alert('Monto inválido');
     if(!desc)return alert('Falta el concepto');
-    if(!parts.size)return alert('Elegí al menos una persona');
-    const o={id:e?e.id:uid(),amt,desc,payer:d.querySelector('#w').value,parts:t.people.filter(p=>parts.has(p.id)).map(p=>p.id),date:e?e.date:Date.now()};
-    if(e)Object.assign(e,o);else t.expenses.push(o);
+    const o={id:e?e.id:uid(),amt,desc,payer,date:e?e.date:Date.now()};
+    if(custom){
+      const r=customVals();if(!r)return alert('Hay un monto inválido en el reparto');
+      const sum=Object.values(r).reduce((x,y)=>x+y,0);
+      if(sum!==amt)return alert(`Los montos del reparto suman ${fmt(sum,t)} y el gasto es ${fmt(amt,t)}`);
+      o.split={};t.people.forEach(p=>{if(r[p.id]>0)o.split[p.id]=r[p.id]});
+      o.parts=Object.keys(o.split);
+    }else{
+      if(!parts.size)return alert('Elegí al menos una persona');
+      o.parts=t.people.filter(p=>parts.has(p.id)).map(p=>p.id);
+    }
+    if(e)t.expenses[t.expenses.indexOf(e)]=o;else t.expenses.push(o);
+    S.lastPayer={...S.lastPayer,[t.id]:payer};
     t.code&&sync&&remoteSave(t,o);save();close();render();
+  };
+}
+
+// ---- importar desde planilla (Monto, Concepto, Pagó, A debe a B, B debe a A) ----
+function parseSheet(t,txt){
+  const [A,B]=t.people,out=[],seen={};
+  const key=(a,d,p)=>a+'|'+d.trim().toLowerCase()+'|'+p;
+  t.expenses.forEach(e=>{const k=key(e.amt,e.desc,e.payer);seen[k]=(seen[k]||0)+1});
+  const who=x=>{x=x.trim().toLowerCase();return x?t.people.find(p=>{const n=p.name.trim().toLowerCase();return n===x||n.startsWith(x)||x.startsWith(n)}):null};
+  txt.split(/\r?\n/).forEach(line=>{
+    if(!line.trim())return;
+    const c=line.split(/\t|;|\|/).map(x=>x.trim());
+    const amt=parseAmt(c[0]);
+    if(isNaN(amt)){if(!/\d/.test(c[0]))return;out.push({line,err:'Monto inválido'});return}
+    const desc=c[1]||'',p=who(c[2]||'');
+    if(!desc)return out.push({line,err:'Falta el concepto'});
+    if(!p)return out.push({line,err:`No reconozco quién pagó ("${c[2]||''}")`});
+    const other=t.people.find(x=>x.id!==p.id);
+    const o4=parseAmt(c[3]||''),o5=parseAmt(c[4]||''),owed=!isNaN(o4)?o4:o5;
+    const e={id:uid(),amt,desc,payer:p.id};
+    if(isNaN(owed))e.parts=c.length>=4?[p.id]:[A.id,B.id];
+    else if(owed>amt)return out.push({line,err:'La deuda es mayor que el monto'});
+    else if(owed===amt)e.parts=[other.id];
+    else{
+      const eq={amt,payer:p.id,parts:[A.id,B.id]};
+      if(amt-(shares(eq).find(s=>s.p===p.id).v)===owed)e.parts=eq.parts;
+      else{e.split={[p.id]:amt-owed,[other.id]:owed};e.parts=Object.keys(e.split).filter(k=>e.split[k]>0);if(!e.split[p.id])delete e.split[p.id]}
+    }
+    const k=key(amt,desc,p.id);
+    if(seen[k]>0){seen[k]--;out.push({line,exp:e,dup:true})}else out.push({line,exp:e});
+  });
+  return out;
+}
+function importDialog(){
+  const t=trip();
+  if(t.code&&!sync)return alert('La sincronización todavía no está lista. Probá de nuevo en unos segundos.');
+  if(t.people.length!==2)return alert('Importar desde planilla funciona con viajes de 2 personas.');
+  const [A,B]=t.people;
+  const d=open(`<h3 style="margin:0">Importar desde planilla</h3>
+  <p class="mu">En Google Sheets seleccioná las filas (Monto, Concepto, Pagó, ${esc(A.name)} debe a ${esc(B.name)}, ${esc(B.name)} debe a ${esc(A.name)}), copiá y pegá acá. Las filas que ya están cargadas se saltean.</p>
+  <textarea id="tx" rows="6" placeholder="Pegá acá las filas"></textarea>
+  <div id="pv" style="max-height:40vh;overflow:auto;margin-top:8px"></div>
+  <div class="acts"><button id="x">Cancelar</button><button class="p" id="ok" disabled>Agregar</button></div>`);
+  let rows=[];
+  const upd=()=>{
+    rows=parseSheet(t,d.querySelector('#tx').value);
+    const nuevos=rows.filter(r=>r.exp&&!r.dup);
+    d.querySelector('#pv').innerHTML=rows.map(r=>r.err?`<div class="bad" style="font-size:13px">✖ ${esc(r.line)} — ${esc(r.err)}</div>`
+      :`<div class="row" style="font-size:13px;${r.dup?'opacity:.5':''}"><span>${r.dup?'↷ ya cargado: ':'✔ '}${esc(r.exp.desc)} · pagó ${esc(name(t,r.exp.payer))} · ${esc(debtText(t,r.exp))}</span><span>${fmt(r.exp.amt,t)}</span></div>`).join('');
+    const ok=d.querySelector('#ok');ok.disabled=!nuevos.length;ok.textContent=nuevos.length?`Agregar ${nuevos.length} gasto${nuevos.length>1?'s':''}`:'Agregar';
+  };
+  d.querySelector('#tx').oninput=upd;
+  d.querySelector('#x').onclick=close;
+  d.querySelector('#ok').onclick=()=>{
+    const nuevos=rows.filter(r=>r.exp&&!r.dup).map(r=>r.exp),now=Date.now();
+    nuevos.forEach((e,i)=>{e.date=now+i;t.expenses.push(e);t.code&&sync&&remoteSave(t,e)});
+    save();close();render();alert(`Se agregaron ${nuevos.length} gastos`);
   };
 }
 
 function menuDialog(){
   const t=trip();
   const d=open(`<h3 style="margin:0">${esc(t.name)}</h3><div style="display:grid;gap:8px;margin-top:12px">
-  ${t.code?'<button id="cd">☁️ Compartir código del viaje</button>':sync?'<button id="sy">☁️ Sincronizar entre celulares</button>':''}
+  <button id="ip">📋 Importar desde planilla</button>
+  ${t.code?'<button id="cd">☁️ Compartir código del viaje</button>':sync&&!SOLO_UN_VIAJE?'<button id="sy">☁️ Sincronizar entre celulares</button>':''}
   <button id="csv">Exportar CSV</button><button id="js">Exportar viaje (JSON)</button><button class="d" id="dt">${t.code?'Quitar de este celular':'Borrar viaje'}</button><button id="x">Cerrar</button></div>`);
   d.querySelector('#x').onclick=close;
+  d.querySelector('#ip').onclick=importDialog;
   d.querySelector('#cd')&&(d.querySelector('#cd').onclick=()=>codeDialog(t));
   d.querySelector('#sy')&&(d.querySelector('#sy').onclick=()=>{enableSync(t);render();codeDialog(t)});
   d.querySelector('#csv').onclick=()=>{
     const q=s=>'"'+String(s).replace(/"/g,'""')+'"';
-    const rows=[['Monto','Concepto','Pagó','Entre'],...t.expenses.map(e=>[(e.amt/100).toFixed(2),e.desc,name(t,e.payer),e.parts.map(p=>name(t,p)).join(' / ')])];
+    const rows=[['Monto','Concepto','Pagó','Deuda'],...t.expenses.map(e=>[c2s(e.amt),e.desc,name(t,e.payer),debtText(t,e)])];
     download(t.name+'.csv',rows.map(r=>r.map(q).join(',')).join('\n'),'text/csv');close();
   };
   d.querySelector('#js').onclick=()=>{download(t.name+'.json',JSON.stringify(t),'application/json');close()};
@@ -288,6 +407,7 @@ function shareSummary(){
   else navigator.clipboard?.writeText(txt).then(()=>alert('Resumen copiado'));
 }
 
+if(S.trips.length)view=(S.trips.find(t=>t.id===S.last)||S.trips[S.trips.length-1]).id;
 render();
 initSync();
 if('serviceWorker'in navigator)navigator.serviceWorker.register('sw.js').catch(()=>{});

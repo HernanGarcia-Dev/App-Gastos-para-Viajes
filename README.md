@@ -11,4 +11,10 @@ Abrí `index.html` desde un servidor web (por ejemplo GitHub Pages). Los datos s
 3. En **Build → Firestore Database** creá la base y, en la pestaña **Reglas**, pegá el contenido de `firestore.rules` y publicá.
 4. Abrí la app: al crear un viaje aparece "Sincronizar entre celulares". El otro celular entra con **Unirme** (código o link).
 
+## Importar desde la planilla
+En el viaje: menú ⋯ → **Importar desde planilla**. Copiá las filas de Google Sheets (Monto, Concepto, Pagó, A debe a B, B debe a A) y pegalas. Las filas ya cargadas se saltean.
+
+## Modo un solo viaje
+`SOLO_UN_VIAJE=true` en `index.html` oculta la creación de viajes. En `firestore.rules` reemplazá `CODIGO_DEL_VIAJE` por el ID del viaje **solo en la consola de Firebase** (no en el repo): así nadie puede crear viajes ni acceder a otro.
+
 Seguridad: no hay login. Cada viaje se identifica con un código aleatorio de 20 caracteres; las reglas impiden listar viajes, así que solo accede quien tenga el código.
