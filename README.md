@@ -11,11 +11,10 @@ Abrí `index.html` desde un servidor web (por ejemplo GitHub Pages). Los datos s
 3. En **Build → Firestore Database** creá la base y, en la pestaña **Reglas**, pegá el contenido de `firestore.rules` y publicá.
 4. Abrí la app: al crear un viaje aparece "Sincronizar entre celulares". El otro celular entra con **Unirme** (código o link).
 
-## Importar desde la planilla
-En el viaje: menú ⋯ → **Importar desde planilla**. Copiá las filas de Google Sheets (Monto, Concepto, Pagó, A debe a B, B debe a A) y pegalas. Las filas ya cargadas se saltean.
+## Personas registradas
+Cada celular se registra como una persona del viaje (identidad anónima de Firebase; hay que activar **Authentication → Anónimo**). Una vez registrada, esa persona queda bloqueada: nadie más puede usarla, y solo los celulares registrados pueden leer y escribir gastos.
 
-## Modo un solo viaje
-`SOLO_UN_VIAJE=true` en `index.html` oculta la creación de viajes. En `firestore.rules` reemplazá `CODIGO_DEL_VIAJE` por el ID del viaje **solo en la consola de Firebase** (no en el repo): así nadie puede crear viajes ni acceder a otro.
+Si un celular pierde su registro (se borran los datos del navegador o se cambia de teléfono), en la consola de Firebase borrá `trips/<código>/claims/<id de la persona>` y el documento correspondiente en `trips/<código>/members/`, y volvé a registrarlo.
 
 ## Protección de datos
 - Nada se borra de verdad: los gastos borrados van a la **Papelera** (menú ⋯) y se restauran.

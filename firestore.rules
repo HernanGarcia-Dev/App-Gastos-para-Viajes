@@ -5,9 +5,19 @@ service cloud.firestore {
     // del documento de tu viaje. No lo subas al repo.
     function esElViaje(code) { return code == 'CODIGO_DEL_VIAJE'; }
 
-    // Un gasto válido, y que cada cambio deje una entrada NUEVA en el historial con los mismos datos.
+    function ruta(code, sub, id) { return /databases/$(database)/documents/trips/$(code)/$(sub)/$(id); }
+    // Celular registrado como una persona del viaje (identidad anónima de Firebase).
+    function esMiembro(code) { return request.auth != null && exists(ruta(code, 'members', request.auth.uid)); }
+    function miPersona(code) { return get(ruta(code, 'members', request.auth.uid)).data.pid; }
+    function esPersona(code, pid) {
+      let pp = get(/databases/$(database)/documents/trips/$(code)).data.people;
+      return (pp.size() > 0 && pp[0].id == pid) || (pp.size() > 1 && pp[1].id == pid)
+          || (pp.size() > 2 && pp[2].id == pid) || (pp.size() > 3 && pp[3].id == pid)
+          || (pp.size() > 4 && pp[4].id == pid) || (pp.size() > 5 && pp[5].id == pid);
+    }
+
     function gastoValido(code, id, d) {
-      let hp = /databases/$(database)/documents/trips/$(code)/history/$(d.h);
+      let hp = ruta(code, 'history', d.h);
       return d.keys().hasOnly(['amt','desc','payer','parts','date','split','cat','del','by','at','h'])
         && d.amt is int && d.amt > 0 && d.amt <= 100000000
         && d.desc is string && d.desc.size() > 0 && d.desc.size() <= 200
@@ -17,7 +27,7 @@ service cloud.firestore {
         && (!('split' in d) || (d.split is map && d.split.size() > 0 && d.split.size() <= 20))
         && (!('cat' in d) || (d.cat is string && d.cat.size() <= 40))
         && (!('del' in d) || d.del is bool)
-        && d.by is string && d.by.size() <= 40
+        && d.by == miPersona(code)
         && d.at == request.time
         && d.h is string && d.h.size() <= 40
         && !exists(hp)
@@ -32,21 +42,42 @@ service cloud.firestore {
       allow get: if esElViaje(code);
       allow list, create, update, delete: if false;
 
-      match /expenses/{id} {
+      // Persona -> celular. Una vez registrada, queda bloqueada para siempre.
+      match /claims/{pid} {
         allow read: if esElViaje(code);
-        allow create, update: if esElViaje(code) && gastoValido(code, id, request.resource.data);
-        allow delete: if false;   // nada se borra de verdad: va a la papelera
+        allow create: if esElViaje(code) && request.auth != null
+          && request.resource.data.keys().hasOnly(['uid','at'])
+          && request.resource.data.uid == request.auth.uid
+          && request.resource.data.at == request.time
+          && esPersona(code, pid)
+          && getAfter(ruta(code, 'members', request.auth.uid)).data.pid == pid;
+        allow update, delete: if false;
+      }
+      // Celular -> persona. Un celular solo puede ser una persona.
+      match /members/{uid} {
+        allow get: if esElViaje(code) && request.auth != null && request.auth.uid == uid;
+        allow create: if esElViaje(code) && request.auth != null && request.auth.uid == uid
+          && request.resource.data.keys().hasOnly(['pid','at'])
+          && request.resource.data.pid is string
+          && request.resource.data.at == request.time
+          && getAfter(ruta(code, 'claims', request.resource.data.pid)).data.uid == uid;
+        allow update, delete: if false;
       }
 
-      // Historial: solo se agregan entradas; nadie puede modificarlas ni borrarlas.
+      match /expenses/{id} {
+        allow read: if esElViaje(code) && esMiembro(code);
+        allow create, update: if esElViaje(code) && esMiembro(code) && gastoValido(code, id, request.resource.data);
+        allow delete: if false;
+      }
+
       match /history/{hid} {
-        allow read: if esElViaje(code);
-        allow create: if esElViaje(code)
+        allow read: if esElViaje(code) && esMiembro(code);
+        allow create: if esElViaje(code) && esMiembro(code)
           && request.resource.data.keys().hasOnly(['exp','act','data','by','at'])
           && request.resource.data.exp is string && request.resource.data.exp.size() <= 40
           && request.resource.data.act in ['save','del','restore','backup']
           && request.resource.data.data is map && request.resource.data.data.size() <= 12
-          && request.resource.data.by is string && request.resource.data.by.size() <= 40
+          && request.resource.data.by == miPersona(code)
           && request.resource.data.at == request.time;
         allow update, delete: if false;
       }

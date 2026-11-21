@@ -44,8 +44,6 @@ details.cat summary{list-style:none;cursor:pointer}details.cat summary::-webkit-
 <dialog id="dlg"></dialog>
 <script>
 const KEY='gastos-viaje-v1';
-// true: la app no permite crear viajes nuevos, solo usar/unirse al viaje existente.
-const SOLO_UN_VIAJE=true;
 // Categorías típicas de viaje. Las personalizadas ("Otra") salen de los gastos cargados, así se comparten solas entre celulares.
 const CATS=[['Alojamiento','🏨'],['Transporte','🚗'],['Comida','🍔'],['Entradas y actividades','🎢'],['Compras','🛍️']];
 const CAT_KW=[['Alojamiento',/hotel|hostel|airbnb|aloja|motel|resort|booking/],
@@ -113,7 +111,6 @@ const name=(t,id)=>t.people.find(p=>p.id===id)?.name||'?';
 // ---- sincronización (Firebase Firestore) ----
 let sync=null;const subs={},pend={},live={},serr={};
 const ALPHA='abcdefghijkmnpqrstuvwxyz23456789';
-const genCode=()=>Array.from(crypto.getRandomValues(new Uint8Array(20)),b=>ALPHA[b%ALPHA.length]).join('');
 const showCode=c=>c.match(/.{1,5}/g).join('-');
 const cleanCode=x=>{x=String(x).trim();const m=x.match(/#join=([\w-]+)/);return(m?m[1]:x).toLowerCase().replace(/[^a-z0-9]/g,'')};
 async function initSync(){
@@ -121,12 +118,17 @@ async function initSync(){
     const cfg=(await import('./firebase-config.js')).default;
     if(cfg&&cfg.projectId){
       const B='https://www.gstatic.com/firebasejs/10.12.2/';
-      const [{initializeApp},fs]=await Promise.all([import(B+'firebase-app.js'),import(B+'firebase-firestore.js')]);
+      const [{initializeApp},fs,au]=await Promise.all([import(B+'firebase-app.js'),import(B+'firebase-firestore.js'),import(B+'firebase-auth.js')]);
       const app=initializeApp(cfg);let db;
       // Long polling: funciona aunque la red móvil retenga las conexiones en vivo.
       try{db=fs.initializeFirestore(app,{experimentalForceLongPolling:true,localCache:fs.persistentLocalCache({tabManager:fs.persistentMultipleTabManager()})})}
       catch{db=fs.getFirestore(app)}
-      sync={db,fs};
+      // Identidad anónima del celular: queda guardada en el dispositivo y es la que se registra como una persona del viaje.
+      const auth=au.getAuth(app);
+      sync={db,fs,au,auth,uid:null,authErr:null};
+      await auth.authStateReady();
+      sync.uid=auth.currentUser?.uid||null;
+      if(!sync.uid)await signIn();
       S.trips.filter(t=>t.code).forEach(subscribe);
     }
   }catch(err){console.warn('Sincronización no disponible',err)}
@@ -134,17 +136,22 @@ async function initSync(){
   const m=location.hash.match(/^#join=([\w-]+)/);
   if(m&&sync){history.replaceState(null,'',location.pathname+location.search);joinDialog(m[1])}
 }
+async function signIn(){
+  try{const r=await sync.au.signInAnonymously(sync.auth);sync.uid=r.user.uid;sync.authErr=null}
+  catch(e){console.warn('Sin identidad',e);sync.authErr=e.code||'error'}
+}
+const srvClaims={},claiming={};
+// Persona registrada por ESTE celular (según la nube), o undefined.
+const mine=t=>sync?.uid&&t.claims?Object.keys(t.claims).find(p=>t.claims[p]===sync.uid):undefined;
+const freePeople=t=>t.people.filter(p=>!t.claims?.[p.id]);
 function subscribe(t){
   if(!sync||subs[t.code]||!S.trips.includes(t))return;
-  const {db,fs}=sync,c=t.code;let u1=()=>{},u2=()=>{},timer=null;
-  const stop=()=>{u1();u2();clearTimeout(timer)};
+  const {db,fs}=sync,c=t.code;let u1=()=>{},u2=null,u3=()=>{},timer=null;
+  const stopExp=()=>{if(u2){u2();u2=null}};
+  const stop=()=>{u1();u3();stopExp();clearTimeout(timer)};
   // Si la escucha en vivo se corta con error, se reintenta sola.
   const onErr=err=>{console.warn('Escucha cortada',err);serr[c]=err.code||'error';live[c]=false;stop();delete subs[c];render();timer=setTimeout(()=>subscribe(t),5000)};
-  u1=fs.onSnapshot(fs.doc(db,'trips',c),snap=>{
-    if(!snap.exists())return;const d=snap.data();
-    t.name=d.name;t.cur=d.cur;t.people=d.people;save();render();
-  },onErr);
-  u2=fs.onSnapshot(fs.collection(db,'trips',c,'expenses'),{includeMetadataChanges:true},snap=>{
+  const startExp=()=>{if(u2)return;u2=fs.onSnapshot(fs.collection(db,'trips',c,'expenses'),{includeMetadataChanges:true},snap=>{
     const all=snap.docs.map(x=>{const d=x.data({serverTimestamps:'estimate'});return {...d,id:x.id,at:d.at?.toMillis?.()??null}});
     const ok=all.filter(e=>validExp(t,e));
     t.expenses=ok.filter(e=>!e.del).sort((a,b)=>a.date-b.date);
@@ -152,8 +159,37 @@ function subscribe(t){
     t.bad=all.length-ok.length;
     if(!snap.metadata.fromCache&&!snap.metadata.hasPendingWrites)backfill(t);
     pend[c]=snap.metadata.hasPendingWrites;live[c]=!snap.metadata.fromCache;delete serr[c];save();render();
+  },onErr)};
+  u1=fs.onSnapshot(fs.doc(db,'trips',c),snap=>{
+    if(!snap.exists())return;const d=snap.data();
+    t.name=d.name;t.cur=d.cur;t.people=d.people;save();render();
+  },onErr);
+  u3=fs.onSnapshot(fs.collection(db,'trips',c,'claims'),{includeMetadataChanges:true},snap=>{
+    const cl={};snap.docs.forEach(x=>cl[x.id]=x.data().uid);t.claims=cl;
+    if(!snap.metadata.fromCache)srvClaims[c]=true;
+    const m=mine(t);
+    if(m){S.me={...S.me,[t.id]:m};if(!snap.metadata.hasPendingWrites)startExp()}
+    else{
+      stopExp();
+      const want=S.me?.[t.id];
+      if(srvClaims[c]&&want&&!cl[want]&&sync.uid&&!claiming[c])claim(t,want);   // ya lo había elegido antes: se registra solo
+      else if(srvClaims[c]&&want&&cl[want]&&!claiming[c]){S.me={...S.me};delete S.me[t.id]}
+    }
+    save();render();
   },onErr);
   subs[c]=stop;
+}
+function claim(t,pid){
+  const {db,fs}=sync,c=t.code;
+  if(!sync.uid)return alert('No se pudo identificar este celular. Revisá la conexión e intentá de nuevo.');
+  claiming[c]=true;S.me={...S.me,[t.id]:pid};save();
+  const b=fs.writeBatch(db);
+  b.set(fs.doc(db,'trips',c,'claims',pid),{uid:sync.uid,at:fs.serverTimestamp()});
+  b.set(fs.doc(db,'trips',c,'members',sync.uid),{pid,at:fs.serverTimestamp()});
+  b.commit().then(()=>{claiming[c]=false}).catch(e=>{
+    console.warn(e);claiming[c]=false;S.me={...S.me};delete S.me[t.id];save();render();
+    alert(`No se pudo registrar este celular como ${name(t,pid)}. Probablemente otro celular ya lo hizo.`);
+  });
 }
 // Al volver a la app o recuperar internet, reconecta en el acto (el celular congela la conexión en segundo plano).
 let kickAt=0;
@@ -161,15 +197,16 @@ function kick(){
   if(!sync||document.hidden||Date.now()-kickAt<3000)return;kickAt=Date.now();
   const {db,fs}=sync;
   fs.disableNetwork(db).then(()=>fs.enableNetwork(db)).catch(e=>console.warn(e));
+  if(!sync.uid)signIn().then(()=>S.trips.filter(t=>t.code).forEach(t=>{subs[t.code]?.();delete subs[t.code];subscribe(t)}));
   S.trips.filter(t=>t.code&&!subs[t.code]).forEach(subscribe);
 }
 let failAt=0;
-const fail=e=>{console.error('Error de sincronización',e);if(Date.now()-failAt>5000){failAt=Date.now();alert('No se pudo guardar en la nube ('+(e.code||e.message)+'). Menú ⋯ → Diagnóstico para ver la causa.')}};
+const fail=e=>{console.error('Error de sincronización',e);if(Date.now()-failAt>5000){failAt=Date.now();alert('No se pudo guardar en la nube ('+(e.code||e.message)+').')}};
 function remoteSave(t,e,act='save',c=t.code){
   const {db,fs}=sync;
   const o={amt:e.amt,desc:e.desc,payer:e.payer,parts:e.parts,date:e.date};
   if(e.split)o.split=e.split;if(e.cat)o.cat=e.cat;if(e.del)o.del=true;
-  const by=meName(t),hr=fs.doc(fs.collection(db,'trips',c,'history')),b=fs.writeBatch(db);
+  const by=S.me?.[t.id]||'',hr=fs.doc(fs.collection(db,'trips',c,'history')),b=fs.writeBatch(db);
   b.set(hr,{exp:e.id,act,data:o,by,at:fs.serverTimestamp()});
   b.set(fs.doc(db,'trips',c,'expenses',e.id),{...o,by,at:fs.serverTimestamp(),h:hr.id});
   b.commit().catch(fail);
@@ -177,7 +214,7 @@ function remoteSave(t,e,act='save',c=t.code){
 // Gastos cargados antes del historial: se respaldan una vez (queda una versión restaurable de cada uno).
 const backed={};
 function backfill(t){
-  if(backed[t.code]||!S.me?.[t.id])return;backed[t.code]=true;
+  if(backed[t.code]||!mine(t))return;backed[t.code]=true;
   [...t.expenses,...(t.trash||[])].filter(e=>!e.h).forEach(e=>remoteSave(t,e,'backup'));
 }
 // Descarta gastos con datos inválidos en vez de romper los cálculos.
@@ -194,13 +231,7 @@ function validExp(t,e){
   if(typeof e.date!=='number')e.date=0;
   return true;
 }
-const meName=t=>name(t,S.me?.[t.id]).slice(0,40);
-function enableSync(t){
-  const {db,fs}=sync,c=genCode();
-  fs.setDoc(fs.doc(db,'trips',c),{name:t.name,cur:t.cur,people:t.people,createdAt:Date.now()}).catch(fail);
-  t.expenses.forEach(e=>remoteSave(t,e,'save',c));
-  t.code=c;save();subscribe(t);
-}
+const whoName=(t,x)=>t.people.find(p=>p.id===x)?.name||x||'?';
 async function joinTrip(raw){
   const c=cleanCode(raw);
   if(c.length<16)return alert('Código inválido');
@@ -219,27 +250,29 @@ async function joinTrip(raw){
 function render(){
   const t=view&&trip();if(view&&!t)view=null;
   if(!t){
-    $('#hd').innerHTML='<h1>✈️ Mis viajes</h1>'+(sync?'<button id="jn">Unirme</button>':'')+(SOLO_UN_VIAJE?'':'<button id="imp">Importar</button>');
-    $('#imp')&&($('#imp').onclick=importJSON);$('#jn')&&($('#jn').onclick=()=>joinDialog());
-    $('#app').innerHTML=(S.trips.length?S.trips.map(x=>`<div class="card row" data-t="${x.id}" style="cursor:pointer"><div><div class="b">${x.code?'☁️ ':''}${esc(x.name)}</div><div class="mu">${x.people.map(p=>esc(p.name)).join(', ')} · ${x.expenses.length} gastos</div></div><div class="b">${fmt(x.expenses.reduce((a,e)=>a+e.amt,0),x)}</div></div>`).join(''):SOLO_UN_VIAJE?'<div class="empty">Abrí el link del viaje que te compartieron,<br>o tocá <b>Unirme</b> y pegá el código.</div>':'<div class="empty">Todavía no hay viajes.<br>Creá el primero.</div>')+(SOLO_UN_VIAJE?'':'<button class="p fab" id="nt">+ Nuevo viaje</button>');
+    $('#hd').innerHTML='<h1>✈️ Mis viajes</h1>'+(sync?'<button id="jn">Unirme</button>':'');
+    $('#jn')&&($('#jn').onclick=()=>joinDialog());
+    $('#app').innerHTML=(S.trips.length?S.trips.map(x=>`<div class="card row" data-t="${x.id}" style="cursor:pointer"><div><div class="b">${x.code?'☁️ ':''}${esc(x.name)}</div><div class="mu">${x.people.map(p=>esc(p.name)).join(', ')} · ${x.expenses.length} gastos</div></div><div class="b">${fmt(x.expenses.reduce((a,e)=>a+e.amt,0),x)}</div></div>`).join(''):'<div class="empty">Abrí el link del viaje que te compartieron,<br>o tocá <b>Unirme</b> y pegá el código.</div>');
     document.querySelectorAll('[data-t]').forEach(el=>el.onclick=()=>{view=el.dataset.t;tab='gastos';render()});
-    $('#nt')&&($('#nt').onclick=tripDialog);return;
+    return;
   }
   if(S.last!==t.id){S.last=t.id;save()}
-  if(t.code&&!S.me?.[t.id]&&!$('#dlg').open)setTimeout(()=>meDialog(t),0);
+  const myP=mine(t),locked=t.code&&sync&&srvClaims[t.code]&&!myP&&!claiming[t.code];
+  if(locked&&freePeople(t).length&&!$('#dlg').open)setTimeout(()=>meDialog(t),0);
   $('#hd').innerHTML=`<button class="ic" id="bk">←</button><h1>${esc(t.name)}</h1><button class="ic" id="mn">⋯</button>`;
   $('#bk').onclick=()=>{view=null;render()};$('#mn').onclick=menuDialog;
   const tot=t.expenses.reduce((a,e)=>a+e.amt,0);
   const st0=settle(t);
   let h=`<div class="card"><div class="row"><span class="mu">Total gastado</span><span class="b">${fmt(tot,t)}</span></div>
   ${st0.length?st0.map(s=>`<div class="row" style="margin-top:6px;font-size:17px"><span>${esc(name(t,s.from))} le debe a ${esc(name(t,s.to))}</span><span class="b bad">${fmt(s.v,t)}</span></div>`).join(''):'<div style="margin-top:6px">Están a mano ✔</div>'}</div>
-  ${t.code?`<div class="mu" style="text-align:center">☁️ ${!sync?'Sincronización no disponible':!navigator.onLine?'Sin conexión · se sincroniza al volver':serr[t.code]?'Error de conexión ('+esc(serr[t.code])+') · reintentando…':pend[t.code]?'Pendiente de sincronizar…':live[t.code]?'Sincronizado en vivo':'Conectando…'}</div>`:''}
+  ${t.code&&!(locked&&!freePeople(t).length)?`<div class="mu" style="text-align:center">☁️ ${!sync?'Sincronización no disponible':!sync.uid?'No se pudo identificar este celular ('+esc(sync.authErr||'sin conexión')+')':!navigator.onLine?'Sin conexión · se sincroniza al volver':serr[t.code]?'Error de conexión ('+esc(serr[t.code])+') · reintentando…':pend[t.code]?'Pendiente de sincronizar…':live[t.code]?'Sincronizado en vivo':'Conectando…'}</div>`:''}
+  ${locked&&!freePeople(t).length?'<div class="card bad">🔒 Todas las personas de este viaje ya están registradas en otros celulares. Este celular no tiene acceso.</div>':''}
   ${t.bad?`<div class="card bad" style="font-size:13px">⚠️ Se ignoraron ${t.bad} gasto${t.bad>1?'s':''} con datos inválidos.</div>`:''}
   <div class="tabs"><button data-tab="gastos" class="${tab==='gastos'?'on':''}">Gastos</button><button data-tab="saldos" class="${tab==='saldos'?'on':''}">Saldos</button><button data-tab="resumen" class="${tab==='resumen'?'on':''}">Resumen</button></div>`;
   if(tab==='gastos'){
     h+=t.expenses.length?[...t.expenses].reverse().map(e=>{
       return `<div class="card row" data-e="${e.id}" style="cursor:pointer"><div><div class="b">${e.cat?catIcon(e.cat)+' ':''}${esc(e.desc)}</div><div class="mu">Pagó ${esc(name(t,e.payer))} · ${esc(debtText(t,e))}</div></div><div class="b">${fmt(e.amt,t)}</div></div>`}).join(''):'<div class="empty">Sin gastos todavía.</div>';
-    h+='<button class="p fab" id="ne">+ Gasto</button>';
+    if(!locked)h+='<button class="p fab" id="ne">+ Gasto</button>';
   }else if(tab==='resumen'){h+=resumen(t)}else{
     const b=balances(t),st=settle(t);
     h+='<div class="card"><div class="mu" style="margin-bottom:6px">Balance por persona</div>'+t.people.map(p=>`<div class="row"><span>${esc(p.name)}</span><span class="b ${b[p.id]>0?'ok':b[p.id]<0?'bad':''}">${b[p.id]>0?'le deben ':b[p.id]<0?'debe ':''}${fmt(Math.abs(b[p.id]),t)}</span></div>`).join('')+'</div>';
@@ -248,11 +281,11 @@ function render(){
   }
   $('#app').innerHTML=h;
   document.querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>{tab=b.dataset.tab;render()});
-  document.querySelectorAll('[data-e]').forEach(el=>el.onclick=()=>expDialog(el.dataset.e));
+  if(!locked)document.querySelectorAll('[data-e]').forEach(el=>el.onclick=()=>expDialog(el.dataset.e));
   $('#ne')&&($('#ne').onclick=()=>expDialog());
   $('#sh')&&($('#sh').onclick=shareSummary);
   $('#ac')&&($('#ac').onclick=()=>{
-    if(t.code&&!sync)return alert('La sincronización todavía no está lista. Probá de nuevo en unos segundos.');
+    if(t.code&&!mine(t))return alert('Este celular todavía no está registrado como una persona del viaje.');
     t.expenses.forEach(e=>{if(!e.cat){const c=guessCat(e.desc);if(c){e.cat=c;t.code&&remoteSave(t,e)}}});save();render();
   });
 }
@@ -277,26 +310,9 @@ function resumen(t){
 function open(html){const d=$('#dlg');if(d.open)d.close();d.innerHTML=html;d.showModal();return d}
 function close(){$('#dlg').close()}
 
-function tripDialog(){
-  const d=open(`<h3 style="margin:0">Nuevo viaje</h3>
-  <label>Nombre</label><input id="n" placeholder="Orlando 2026">
-  <label>Personas (separadas por coma)</label><input id="p" placeholder="Her, Lu">
-  <label>Símbolo de moneda</label><input id="c" value="$">
-  ${sync?'<label style="display:flex;gap:8px;align-items:center;color:var(--tx)"><input type="checkbox" id="sy" checked style="width:auto"> Sincronizar entre celulares</label>':''}
-  <div class="acts"><button id="x">Cancelar</button><button class="p" id="ok">Crear</button></div>`);
-  d.querySelector('#x').onclick=close;
-  d.querySelector('#ok').onclick=()=>{
-    const n=d.querySelector('#n').value.trim();
-    const ps=[...new Set(d.querySelector('#p').value.split(',').map(s=>s.trim()).filter(Boolean))];
-    if(!n||ps.length<2)return alert('Poné un nombre y al menos 2 personas');
-    const t={id:uid(),name:n,cur:d.querySelector('#c').value.trim()||'$',people:ps.map(x=>({id:uid(),name:x})),expenses:[]};
-    S.trips.push(t);save();if(sync&&d.querySelector('#sy')?.checked){enableSync(t);view=t.id;tab='gastos';render();codeDialog(t);return}view=t.id;tab='gastos';close();render();
-  };
-}
-
 function expDialog(id){
   const t=trip(),e=id?t.expenses.find(x=>x.id===id):null;
-  if(t.code&&!sync)return alert('La sincronización todavía no está lista. Probá de nuevo en unos segundos.');
+  if(t.code&&!mine(t))return sync&&srvClaims[t.code]&&freePeople(t).length?meDialog(t):alert('Este celular todavía no está registrado como una persona del viaje. Necesitás conexión a internet.');
   const lp=S.lastPayer?.[t.id];
   const me=S.me?.[t.id],ok1=x=>t.people.some(p=>p.id===x);
   let payer=e?e.payer:ok1(me)?me:ok1(lp)?lp:t.people[0].id;
@@ -313,7 +329,7 @@ function expDialog(id){
   <div class="row" style="margin-top:12px"><span class="mu">Reparto</span><button class="chip" id="md"></button></div>
   <div id="ch" style="margin-top:8px"></div>
   <div class="mu" id="pv" style="margin-top:8px"></div>
-  ${e&&e.by?`<div class="mu" style="margin-top:10px">Última edición: ${esc(e.by)}${e.at?' · '+new Date(e.at).toLocaleString('es-AR',{dateStyle:'short',timeStyle:'short'}):''}</div>`:''}
+  ${e&&e.by?`<div class="mu" style="margin-top:10px">Última edición: ${esc(whoName(t,e.by))}${e.at?' · '+new Date(e.at).toLocaleString('es-AR',{dateStyle:'short',timeStyle:'short'}):''}</div>`:''}
   <div class="acts">${e?'<button class="d" id="del">Borrar</button>':''}${e&&t.code?'<button id="hi">Historial</button>':''}<button id="x">Cancelar</button><button class="p" id="ok">Guardar</button></div>`);
   d.querySelector('#hi')&&(d.querySelector('#hi').onclick=()=>historyDialog(t,e));
   const amtNow=()=>parseAmt(d.querySelector('#a').value);
@@ -395,99 +411,39 @@ function expDialog(id){
   };
 }
 
-// ---- importar desde planilla (Monto, Concepto, Pagó, A debe a B, B debe a A) ----
-function parseSheet(t,txt){
-  const [A,B]=t.people,out=[],seen={};
-  const key=(a,d,p)=>a+'|'+d.trim().toLowerCase()+'|'+p;
-  t.expenses.forEach(e=>{const k=key(e.amt,e.desc,e.payer);seen[k]=(seen[k]||0)+1});
-  const who=x=>{x=x.trim().toLowerCase();return x?t.people.find(p=>{const n=p.name.trim().toLowerCase();return n===x||n.startsWith(x)||x.startsWith(n)}):null};
-  txt.split(/\r?\n/).forEach(line=>{
-    if(!line.trim())return;
-    const c=line.split(/\t|;|\|/).map(x=>x.trim());
-    const amt=parseAmt(c[0]);
-    if(isNaN(amt)){if(!/\d/.test(c[0]))return;out.push({line,err:'Monto inválido'});return}
-    const desc=c[1]||'',p=who(c[2]||'');
-    if(!desc)return out.push({line,err:'Falta el concepto'});
-    if(!p)return out.push({line,err:`No reconozco quién pagó ("${c[2]||''}")`});
-    const other=t.people.find(x=>x.id!==p.id);
-    const o4=parseAmt(c[3]||''),o5=parseAmt(c[4]||''),owed=!isNaN(o4)?o4:o5;
-    const e={id:uid(),amt,desc,payer:p.id};const gc=guessCat(desc);if(gc)e.cat=gc;
-    if(isNaN(owed))e.parts=c.length>=4?[p.id]:[A.id,B.id];
-    else if(owed>amt)return out.push({line,err:'La deuda es mayor que el monto'});
-    else if(owed===amt)e.parts=[other.id];
-    else{
-      const eq={amt,payer:p.id,parts:[A.id,B.id]};
-      if(amt-(shares(eq).find(s=>s.p===p.id).v)===owed)e.parts=eq.parts;
-      else{e.split={[p.id]:amt-owed,[other.id]:owed};e.parts=Object.keys(e.split).filter(k=>e.split[k]>0);if(!e.split[p.id])delete e.split[p.id]}
-    }
-    const k=key(amt,desc,p.id);
-    if(seen[k]>0){seen[k]--;out.push({line,exp:e,dup:true})}else out.push({line,exp:e});
-  });
-  return out;
-}
-function importDialog(){
-  const t=trip();
-  if(t.code&&!sync)return alert('La sincronización todavía no está lista. Probá de nuevo en unos segundos.');
-  if(t.people.length!==2)return alert('Importar desde planilla funciona con viajes de 2 personas.');
-  const [A,B]=t.people;
-  const d=open(`<h3 style="margin:0">Importar desde planilla</h3>
-  <p class="mu">En Google Sheets seleccioná las filas (Monto, Concepto, Pagó, ${esc(A.name)} debe a ${esc(B.name)}, ${esc(B.name)} debe a ${esc(A.name)}), copiá y pegá acá. Las filas que ya están cargadas se saltean.</p>
-  <textarea id="tx" rows="6" placeholder="Pegá acá las filas"></textarea>
-  <div id="pv" style="max-height:40vh;overflow:auto;margin-top:8px"></div>
-  <div class="acts"><button id="x">Cancelar</button><button class="p" id="ok" disabled>Agregar</button></div>`);
-  let rows=[];
-  const upd=()=>{
-    rows=parseSheet(t,d.querySelector('#tx').value);
-    const nuevos=rows.filter(r=>r.exp&&!r.dup);
-    d.querySelector('#pv').innerHTML=rows.map(r=>r.err?`<div class="bad" style="font-size:13px">✖ ${esc(r.line)} — ${esc(r.err)}</div>`
-      :`<div class="row" style="font-size:13px;${r.dup?'opacity:.5':''}"><span>${r.dup?'↷ ya cargado: ':'✔ '}${esc(r.exp.desc)} · pagó ${esc(name(t,r.exp.payer))} · ${esc(debtText(t,r.exp))}</span><span>${fmt(r.exp.amt,t)}</span></div>`).join('');
-    const ok=d.querySelector('#ok');ok.disabled=!nuevos.length;ok.textContent=nuevos.length?`Agregar ${nuevos.length} gasto${nuevos.length>1?'s':''}`:'Agregar';
-  };
-  d.querySelector('#tx').oninput=upd;
-  d.querySelector('#x').onclick=close;
-  d.querySelector('#ok').onclick=()=>{
-    const nuevos=rows.filter(r=>r.exp&&!r.dup).map(r=>r.exp),now=Date.now();
-    nuevos.forEach((e,i)=>{e.date=now+i;t.expenses.push(e);t.code&&sync&&remoteSave(t,e)});
-    save();close();render();alert(`Se agregaron ${nuevos.length} gastos`);
-  };
-}
-
 function menuDialog(){
-  const t=trip();
+  const t=trip(),m=mine(t);
   const d=open(`<h3 style="margin:0">${esc(t.name)}</h3><div style="display:grid;gap:8px;margin-top:12px">
-  <button id="ip">📋 Importar desde planilla</button>
-  ${t.code?`<button id="tr">🗑️ Papelera (${(t.trash||[]).length})</button><button id="me">👤 Este celular es de: ${esc(meName(t)||'?')}</button><button id="dg">🩺 Diagnóstico de sincronización</button>`:''}
-  ${t.code?'<button id="cd">☁️ Compartir código del viaje</button>':sync&&!SOLO_UN_VIAJE?'<button id="sy">☁️ Sincronizar entre celulares</button>':''}
-  <button id="csv">Exportar CSV</button><button id="js">Exportar viaje (JSON)</button><button class="d" id="dt">${t.code?'Quitar de este celular':'Borrar viaje'}</button><button id="x">Cerrar</button></div>`);
+  ${t.code?`<button id="tr">🗑️ Papelera (${(t.trash||[]).length})</button>
+  <button id="me">👤 Este celular: ${m?esc(name(t,m))+' 🔒':'sin registrar'}</button>
+  <button id="cd">☁️ Compartir código del viaje</button>`:''}
+  <button id="x">Cerrar</button></div>`);
   d.querySelector('#x').onclick=close;
-  d.querySelector('#ip').onclick=importDialog;
   d.querySelector('#tr')&&(d.querySelector('#tr').onclick=()=>trashDialog(t));
   d.querySelector('#me')&&(d.querySelector('#me').onclick=()=>meDialog(t));
-  d.querySelector('#dg')&&(d.querySelector('#dg').onclick=()=>diagDialog(t));
   d.querySelector('#cd')&&(d.querySelector('#cd').onclick=()=>codeDialog(t));
-  d.querySelector('#sy')&&(d.querySelector('#sy').onclick=()=>{enableSync(t);render();codeDialog(t)});
-  d.querySelector('#csv').onclick=()=>{
-    const q=s=>'"'+String(s).replace(/"/g,'""')+'"';
-    const rows=[['Monto','Concepto','Categoría','Pagó','Deuda'],...t.expenses.map(e=>[c2s(e.amt),e.desc,e.cat||'',name(t,e.payer),debtText(t,e)])];
-    download(t.name+'.csv',rows.map(r=>r.map(q).join(',')).join('\n'),'text/csv');close();
-  };
-  d.querySelector('#js').onclick=()=>{download(t.name+'.json',JSON.stringify(t),'application/json');close()};
-  d.querySelector('#dt').onclick=()=>{
-    const msg=t.code?'¿Quitar el viaje de este celular? Los datos siguen en la nube y podés volver a unirte con el código.':'¿Borrar el viaje y todos sus gastos?';
-    if(confirm(msg)){if(t.code){subs[t.code]?.();delete subs[t.code]}S.trips=S.trips.filter(x=>x.id!==t.id);save();view=null;close();render()}
-  };
 }
 function meDialog(t){
-  const d=open(`<h3 style="margin:0">¿De quién es este celular?</h3>
-  <p class="mu">Se usa para registrar quién carga o edita cada gasto, y como "Pagó" por defecto.</p>
-  <div class="chips">${t.people.map(p=>`<button class="chip ${S.me?.[t.id]===p.id?'on':''}" data-m="${p.id}">${esc(p.name)}</button>`).join('')}</div>`);
-  d.querySelectorAll('[data-m]').forEach(b=>b.onclick=()=>{S.me={...S.me,[t.id]:b.dataset.m};save();close();render();backfill(t)});
+  const m=mine(t);
+  if(m){const d=open(`<h3 style="margin:0">👤 ${esc(name(t,m))} 🔒</h3><p>Este celular está registrado como <b>${esc(name(t,m))}</b>. No se puede cambiar, y nadie más puede registrarse como ${esc(name(t,m))}.</p><div class="acts"><button id="x">Cerrar</button></div>`);d.querySelector('#x').onclick=close;return}
+  if(!sync||!srvClaims[t.code]){const d=open('<h3 style="margin:0">¿Quién sos?</h3><p>Necesitás conexión a internet para registrar este celular.</p><div class="acts"><button id="x">Cerrar</button></div>');d.querySelector('#x').onclick=close;return}
+  const d=open(`<h3 style="margin:0">¿Quién sos?</h3>
+  <p class="mu">Este celular queda registrado como esa persona <b>para siempre</b>: nadie más va a poder registrarse con ese nombre, y solo los celulares registrados pueden ver y cargar gastos.</p>
+  <div class="chips">${t.people.map(p=>t.claims?.[p.id]?`<button class="chip" disabled style="opacity:.5">🔒 ${esc(p.name)}</button>`:`<button class="chip" data-m="${p.id}">${esc(p.name)}</button>`).join('')}</div>
+  ${freePeople(t).length?'':'<p class="bad">Todas las personas ya están registradas en otros celulares.</p>'}
+  <div class="acts"><button id="x">Cerrar</button></div>`);
+  d.querySelector('#x').onclick=close;
+  d.querySelectorAll('[data-m]').forEach(b=>b.onclick=()=>{
+    const pid=b.dataset.m;
+    if(!confirm(`¿Registrar este celular como ${name(t,pid)}? No se puede deshacer.`))return;
+    claim(t,pid);close();render();
+  });
 }
 function trashDialog(t){
   const tr=t.trash||[];
   const d=open(`<h3 style="margin:0">🗑️ Papelera</h3>
   <div style="max-height:55vh;overflow:auto;margin-top:8px">${tr.length?tr.map(e=>`<div class="card"><div class="row"><span class="b">${esc(e.desc)}</span><span class="b">${fmt(e.amt,t)}</span></div>
-    <div class="row"><span class="mu">Borró ${esc(e.by||'?')}${e.at?' · '+new Date(e.at).toLocaleString('es-AR',{dateStyle:'short',timeStyle:'short'}):''}</span><button data-r="${e.id}">Restaurar</button></div></div>`).join(''):'<div class="empty">Vacía</div>'}</div>
+    <div class="row"><span class="mu">Borró ${esc(whoName(t,e.by))}${e.at?' · '+new Date(e.at).toLocaleString('es-AR',{dateStyle:'short',timeStyle:'short'}):''}</span><button data-r="${e.id}">Restaurar</button></div></div>`).join(''):'<div class="empty">Vacía</div>'}</div>
   <div class="acts"><button id="x">Cerrar</button></div>`);
   d.querySelector('#x').onclick=close;
   d.querySelectorAll('[data-r]').forEach(b=>b.onclick=()=>{
@@ -506,7 +462,7 @@ async function historyDialog(t,e){
     .map(x=>{const v=x.data({serverTimestamps:'estimate'});return {...v,at:v.at?.toMillis?.()??0}}).sort((a,b)=>b.at-a.at)}
   catch(err){console.warn(err);d.innerHTML='<p>No se pudo cargar el historial. Revisá la conexión.</p><div class="acts"><button id="x">Cerrar</button></div>';d.querySelector('#x').onclick=close;return}
   d.innerHTML=`<h3 style="margin:0">Historial</h3><div style="max-height:55vh;overflow:auto;margin-top:8px">${hs.map((h,i)=>{const v=h.data||{};const ok=validExp(t,{...v});
-    return `<div class="card"><div class="mu">${ACT[h.act]||esc(h.act)} ${esc(h.by||'?')} · ${h.at?new Date(h.at).toLocaleString('es-AR',{dateStyle:'short',timeStyle:'short'}):''}</div>
+    return `<div class="card"><div class="mu">${ACT[h.act]||esc(h.act)} ${esc(whoName(t,h.by))} · ${h.at?new Date(h.at).toLocaleString('es-AR',{dateStyle:'short',timeStyle:'short'}):''}</div>
     <div class="row"><span>${esc(v.desc||'')}${v.del?' (borrado)':''}</span><span class="b">${ok?fmt(v.amt,t):'datos inválidos'}</span></div>
     ${ok?`<div class="mu">Pagó ${esc(name(t,v.payer))} · ${esc(debtText(t,v))}</div>`:''}
     ${i>0&&ok&&!v.del?`<div style="text-align:right;margin-top:6px"><button data-v="${i}">Restaurar esta versión</button></div>`:''}</div>`}).join('')||'<div class="empty">Sin historial</div>'}</div>
@@ -520,29 +476,10 @@ async function historyDialog(t,e){
     remoteSave(t,x,'restore');save();close();render();
   });
 }
-async function diagDialog(t){
-  if(!sync)return alert('La sincronización no está disponible en este celular (no cargó Firebase).');
-  const {db,fs}=sync,d=open('<h3 style="margin:0">🩺 Diagnóstico</h3><p class="mu">Revisando…</p>');
-  const run=async f=>{try{await f();return 'ok'}catch(e){return e.code||e.message}};
-  const viaje=await run(()=>fs.getDocFromServer(fs.doc(db,'trips',t.code)));
-  const hist=await run(()=>fs.getDocsFromServer(fs.query(fs.collection(db,'trips',t.code,'history'),fs.limit(1))));
-  const ic=x=>x==='ok'?'✔':'✖';
-  let msg;
-  if(viaje==='unavailable'||hist==='unavailable')msg='No hay conexión con Firebase. Revisá internet y volvé a probar.';
-  else if(viaje==='permission-denied')msg=`El código del viaje en las reglas <b>no coincide</b>. En Firebase → Firestore → Reglas, la línea <code>esElViaje</code> tiene que tener exactamente este código entre comillas simples:`;
-  else if(hist==='permission-denied')msg='Las reglas publicadas son las <b>viejas</b>. Pegá las reglas nuevas (con tu código en la línea 4) y tocá <b>Publicar</b>. Después recargá la app.';
-  else if(viaje==='ok'&&hist==='ok')msg='Las reglas están bien. Si igual aparece "permission-denied", mandá una captura de esta pantalla.';
-  else msg='Resultado inesperado. Mandá una captura de esta pantalla.';
-  d.innerHTML=`<h3 style="margin:0">🩺 Diagnóstico</h3>
-  <div class="card"><div>${ic(viaje)} Leer el viaje <span class="mu">(${esc(viaje)})</span></div><div>${ic(hist)} Reglas nuevas activas <span class="mu">(${esc(hist)})</span></div></div>
-  <p>${msg}</p>${viaje==='permission-denied'?`<div class="card b" style="word-break:break-all;text-align:center;user-select:all">${esc(t.code)}</div>`:''}
-  <div class="acts"><button id="x">Cerrar</button></div>`;
-  d.querySelector('#x').onclick=close;
-}
 function codeDialog(t){
   const link=location.origin+location.pathname+'#join='+t.code;
   const d=open(`<h3 style="margin:0">Compartir viaje</h3>
-  <p class="mu">Quien tenga este código puede ver y editar los gastos. Pasalo solo a quien viaja con vos.</p>
+  <p class="mu">Con este código otro celular puede unirse, pero solo si queda alguna persona del viaje sin registrar.</p>
   <div class="card b" style="word-break:break-all;text-align:center">${showCode(t.code)}</div>
   <div class="acts"><button id="x">Cerrar</button><button class="p" id="sh">Compartir link</button></div>`);
   d.querySelector('#x').onclick=close;
@@ -560,16 +497,6 @@ function joinDialog(pre=''){
   d.querySelector('#ok').onclick=()=>joinTrip(d.querySelector('#c').value);
 }
 
-function download(fn,txt,type){const a=document.createElement('a');a.href=URL.createObjectURL(new Blob([txt],{type}));a.download=fn;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000)}
-function importJSON(){
-  const i=document.createElement('input');i.type='file';i.accept='.json';
-  i.onchange=async()=>{try{
-    const t=JSON.parse(await i.files[0].text());
-    if(!t.name||!Array.isArray(t.people)||!Array.isArray(t.expenses))throw 0;
-    t.id=uid();delete t.code;S.trips.push(t);save();render();
-  }catch{alert('Archivo inválido')}};
-  i.click();
-}
 function shareSummary(){
   const t=trip(),st=settle(t);
   const txt=`${t.name}\nTotal: ${fmt(t.expenses.reduce((a,e)=>a+e.amt,0),t)}\n`+(st.length?st.map(s=>`${name(t,s.from)} le debe ${fmt(s.v,t)} a ${name(t,s.to)}`).join('\n'):'Están a mano');
